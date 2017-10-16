@@ -1,0 +1,895 @@
+实例:
+ 保证webserver的数据一致
+++++++++++++++++++++++++++++++++++++
+servera1  webserver(apache:80+rsyncd:873)  172.25.1.10
+serverb1  webserver(apache:80+rsyncd:873)  172.25.1.11
+serverc1  websrever(apache:80+rsyncd:873)  172.25.1.12
+++++++++++++++++++++++++++++++++++++
+
+sreverd1 发布页面代码 sersync+rsync客户端
+
+
+
+第一步:
+[root@servera ~]# yum -y install httpd
+[root@servera ~]# yum -y install rsync
+
+[root@servera ~]# vim /etc/rsyncd.conf 
+uid = apache
+gid = apache
+use chroot = yes
+max connections = 4
+pid file = /var/run/rsyncd.pid
+exclude = lost+found/
+transfer logging = yes
+timeout = 900
+ignore nonreadable = yes
+dont compress   = *.gz *.tgz *.zip *.z *.Z *.rpm *.deb *.bz2 *.iso
+
+[webshare]
+         path = /var/www/html
+         comment = www.abc.com html page
+         read only = no
+         auth users=user01 user02
+         secrets file=/etc/rsyncd_user.db
+
+[root@servera ~]# echo "/usr/bin/rsync --daemon" >> /etc/rc.local 
+[root@servera ~]# chmod +x /etc/rc.d/rc.local
+[root@servera ~]# pkill -9 rsync ; rm -fr /var/run/rsyncd.pid
+[root@servera ~]# source  /etc/rc.local
+
+[root@servera ~]# netstat -tnlp |grep :873
+
+[root@servera ~]# chown apache.apache /var/www/html/
+[root@servera ~]# service httpd start
+[root@servera ~]# chkconfig httpd on
+
+
+
+
+"serverb与sreverc 同上操作"
+
+
+
+
+第二步: 在master(serverd)上手动测试 rsync 同步情况
+ serverd: 
+[root@serverd ~]# chown 48.48 /uplooking/
+[root@serverd ~]# chmod 770 /uplooking/
+
+[root@serverd ~]# echo test > test.html
+
+
+[root@serverd ~]# rsync -v 172.25.1.10::
+webshare       	www.abc.com html page
+[root@serverd ~]# rsync -v 172.25.1.11::
+webshare       	www.abc.com html page
+[root@serverd ~]# rsync -v 172.25.1.12::
+webshare       	www.abc.com html page
+
+
+
+[root@serverd ~]# echo "123" > /root/.rsync_pass 
+[root@serverd ~]# chmod 600 /root/.rsync_pass 
+
+[root@serverd ~]# for i in {10..12}; do rsync -avz --delete --password-file=/root/.rsync_pass /root/test.html user01@172.25.1.$i::webshare; done
+
+web服务器查看页面是否上传:
+
+[root@serverd ~]# ssh-keygen 
+[root@serverd ~]# ssh-copy-id root@172.25.1.10
+[root@serverd ~]# ssh-copy-id root@172.25.1.11
+[root@serverd ~]# ssh-copy-id root@172.25.1.12
+
+[root@serverd ~]# for i in {10..12}
+> do
+> ssh root@172.25.1.$i "cat /var/www/html/test.html"
+> done
+test
+test
+test
+
+
+第三步： 安装servsync
+
+ 
+Rsync+Inotify-tools与Rsync+sersync这两种架构有什么区别？
+
+1、Rsync+Inotify-tools
+（1）：Inotify-tools只能记录下被监听的目录发生了变化（包括增加、删除、修改），并没有把具体是哪个文件或者哪个目录发生了变化记录下来；
+（2）：rsync在同步的时候，并不知道具体是哪个文件或者哪个目录发生了变化，每次都是对整个目录进行同步，当数据量很大时，整个目录同步非常耗时（rsync要对整个目录遍历查找对比文件），因此，效率很低。
+
+2、Rsync+sersync
+（1）：sersync可以记录下被监听目录中发生变化的（包括增加、删除、修改）具体某一个文件或某一个目录的名字；
+（2）：rsync在同步的时候，只同步发生变化的这个文件或者这个目录（每次发生变化的数据相对整个同步目录数据来说是很小的，rsync在遍历查找比对文件时，速度很快），因此，效率很高。
+
+小结：当同步的目录数据量不大时，建议使用Rsync+Inotify-tools；当数据量很大（几百G甚至1T以上）、文件很多时，建议使用Rsync+sersync。
+
+-------------------------------------
+
+
+
+ 1） 安装sersync
+[root@serverd uplooking]# yum -y install rsync
+[root@serverd ~]# wget ftp://172.25.254.250/notes/project/software/sersync2.5.4_64bit_binary_stable_final.tar.gz
+
+[root@serverd ~]# tar xf sersync2.5.4_64bit_binary_stable_final.tar.gz -C /opt/
+[root@serverd ~]# mv /opt/GNU-Linux-x86 /opt/sersync
+
+
+
+ 2) 修改的内容
+[root@serverd ~]# cat /opt/sersync/confxml.xml
+
+ <sersync>
+        <localpath watch="/uplooking">
+            <remote ip="172.25.1.10" name="webshare"/>  远程主机与rsync共享名称
+            <remote ip="172.25.1.11" name="webshare"/>
+            <remote ip="172.25.1.12" name="webshare"/>
+        </localpath>
+        <rsync>
+            <commonParams params="-az"/>
+            <auth start="true" users="user02" passwordfile="/etc/rsync.pas"/>  --使用帐号
+            <userDefinedPort start="false" port="874"/><!-- port=874 -->
+            <timeout start="false" time="100"/><!-- timeout=100 -->
+            <ssh start="false"/>
+        </rsync>
+
+[root@serverd ~]# echo 456 > /etc/rsync.pas
+[root@serverd ~]# chmod 600 /etc/rsync.pas 
+
+ 3) 启动服务
+[root@serverd sersync]# ./sersync2 -d -r -n 12 -o ./confxml.xml 
+
+
+
+
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+常用web服务器如下:
+Unix 和Linux 平台下的常用用Web 服务器有Apache、Nginx、Lighttpd、Tomcat、IBM WebSphere 等。⺫目目前应 用用最干广广泛的Web 服务器是Apache。Windows 平台下最常用用的服务器则是微软公司的IIS(Internet Information Server)。
+
+Nginx 是俄罗斯人人编写的十十分轻量级的HTTP 服务器,Nginx,它的发音音为“engine X”, 是一一个高高性能的HTTP 和反向代理服务器,同时也是一一个IMAP/POP3/SMTP 代理服务器。Nginx 是由俄罗斯人人Igor Sysoev 为俄罗斯访问量第二二的Rambler.ru 站点开发的,它已经在该站点运行行超过两年半了。Igor Sysoev 在建立立的项⺫目目时,使用用基于BSD 许可。自自Nginx 发布四年来,Nginx 已经因为它的稳定性、丰富的功能集、示示例配置文文件和低系统资源的消耗而而闻名。在俄罗斯许多大大⺴网网站都已经使用用它,且一一直表现不凡。截至至2007 年4 月月,俄罗斯大大约有20%左右的虚拟主机是由nignx服务或代理的。Google 在线安全博客中统计Nginx 服务或代理了大大约所有Internet 虚拟主机的4%。而而Netcraft 的统计显示示,Nginx 服务的主机在过去的一一年里里以四倍的速度增⻓长并且在这几几年里里,它的排名还在不断上升。
+
+
+  成功二次开源 http://tengine.taobao.org/
+
+
+NGINX的优势:
+1)Nginx 性能强大大（50,000 个并发连接数）
+2)Nginx 稳定性高高 
+3)Nginx 支支持热部署（平滑重启）
+4)Nginx
+采用用master-slave 模型
+5)Nginx 代码质量高
+高并发下nginx 能保持低资源低消耗高高性能
+.....
+
+nginx的安装:
+[root@servera ~]# setenforce 0
+[root@servera ~]# iptables -F
+
+[root@servera ~]# rpm -ivh ftp://172.25.254.250/notes/project/UP200/UP200_nginx-master/pkg/nginx-1.8.0-1.el7.ngx.x86_64.rpm
+
+[root@servera ~]# rpm -ql nginx
+/etc/logrotate.d/nginx  --日志轮询
+/etc/nginx 
+/etc/nginx/conf.d  --子配置文件
+/etc/nginx/conf.d/default.conf  
+/etc/nginx/conf.d/example_ssl.conf
+/etc/nginx/fastcgi_params  --内置变量
+/etc/nginx/koi-utf  --俄国语言编码
+/etc/nginx/koi-win
+/etc/nginx/mime.types  --nginx识别的类型文件
+/etc/nginx/nginx.conf  --主配置文件
+/etc/nginx/scgi_params
+/etc/nginx/uwsgi_params
+/etc/nginx/win-utf
+/etc/sysconfig/nginx 
+/usr/lib/systemd/system/nginx.service  --启动脚本
+/usr/libexec/initscripts/legacy-actions/nginx
+/usr/libexec/initscripts/legacy-actions/nginx/upgrade
+/usr/sbin/nginx  --二进制命令
+/usr/share/nginx  --数据目录
+/usr/share/nginx/html  --html页面加目录
+/usr/share/nginx/html/50x.html  --错误代码
+
+
+
+
+/usr/share/nginx/html/index.html
+/var/cache/nginx
+/var/log/nginx
+
+
+启动nginx
+[root@servera ~]# systemctl start nginx
+
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+nginx的基本配置
+user  nginx;  以nginx用户运行程序
+worker_processes  1; --进程（CPU倍数"2")
+
+error_log  /var/log/nginx/error.log warn;  --错误日志
+pid        /var/run/nginx.pid;  
+
+
+events { 
+    worker_connections  1024;  --进程最大连接数65535
+}
+
+
+http {
+    include       /etc/nginx/mime.types;  --类型
+    default_type  application/octet-stream;  --默认文文件类型
+
+    log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '    --日志格式main
+                      '$status $body_bytes_sent "$http_referer" '
+                      '"$http_user_agent" "$http_x_forwarded_for"';
+
+    access_log  /var/log/nginx/access.log  main; --访问日志
+
+    sendfile        on;  --高效率
+    tcp_nopush      on;  --TCP拥塞  
+    keepalive_timeout  65; --保持会话
+    gzip  on;		   --高压缩
+
+    include /etc/nginx/conf.d/*.conf;  ---外部调用
+}
+
+---------------------------------------------------------
+
+[root@servera ~]# cat /etc/nginx/conf.d/default.conf 
+
+
+[root@servera ~]# cat /etc/nginx/conf.d/default.conf   --虚拟主机
+server {
+    listen       80;
+    server_name  localhost;  --域名
+    charset koi8-r;  --语言编码
+    access_log  /var/log/nginx/log/host.access.log  main;  --access日志
+    location / {    ---location（url匹配动作）
+        root   /usr/share/nginx/html;  --网页根目录
+        index  index.html index.htm;   --索引搜索顺序
+    }
+
+    error_page   500 502 503 504  /50x.html;
+    location = /50x.html {  --错误页面
+        root   /usr/share/nginx/html;
+    }
+
+}
+--------------------------------------------------------
+
+进程是系统进行行资源分配和调度的常⻅见单位,在面面向进程设计的程序中,进程是程序的基本执行行实体,程序使用用进程处理用用户请求,进程是内存独享的,运行行稳定,处理速度较快,但是资源占用用比比较大大。
+进程是线程的容器,也就是进程去开辟地址空
+间,线程去处理用用户请求,在面面向线程处理的程序中,线程是基本执行行实体线 程是内存共享的,资源占用用小小,但是稳定性没有进程好。 Apache 在处理用用户请求时,有perfork 模式和worker 模式两种,默认使用用perfork 模式,即使用用进程处理用用户请求。
+
+
+
+
+[root@servera nginx-rpms]# vim /etc/nginx/nginx.conf
+user nginx;
+worker_processes 4;  CPU2倍数
+error_log
+pid
+/var/log/nginx/error.log warn;
+/var/run/nginx.pid;
+events {
+worker_connections  2048；
+}
+
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+
+ 虚拟主机:  www.test.com
+[root@servera ~]# vim /etc/nginx/conf.d/default.conf 
+
+
+server {
+    listen       80;
+    server_name  www.test.com;
+    charset utf-8;
+    access_log  /var/log/nginx/www.test.com.access.log  main;
+
+    location / {
+        root   /usr/share/nginx/test.com;
+        index  index.html index.htm;
+    }
+ }
+
+[root@servera ~]# mkdir -p /usr/share/nginx/test.com
+[root@servera ~]# echo welcom to test.com > /usr/share/nginx/test.com/index.html
+[root@servera ~]# ulimit -HSn 65535  --解除限制（open file resource limit: 1024）
+
+[root@servera ~]# nginx  -t
+nginx: the configuration file /etc/nginx/nginx.conf syntax is ok
+nginx: configuration file /etc/nginx/nginx.conf test is successful
+[root@servera ~]# ps -aux |grep nginx
+[root@servera ~]# kill -HUP 1445(主进程pid号) ---平滑重启
+ 
+测试：
+[root@foundation0 ~]# echo "172.25.1.10 www.test.com" >> /etc/hosts
+
+[root@foundation0 ~]# elinks http://www.test.com -dump
+   welcom to test.com
+
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+location的匹配字段用用来匹配url地址的路径部分。location匹配也可以采用用正则表达式,有符号的location 优先级高。
+
+如果访问index.html ---> 目录: /usr/share/nginx/test.com/index.html
+   location / {
+        root   /usr/share/nginx/test.com;
+        index  index.html index.htm;
+    }
+
+
+如果访问test.html ---> 目录: /usr/share/nginx/html/test.html
+
+
+   location ~ ^/test\.html$ {
+        root   /usr/share/nginx/html;
+        index  index.html index.htm;
+    }
++++++++++++++++++++++++注意+++++++++++++++++++++++	
+    location = /test.html {
+	root /www1
+        index  index.html index.htm;
+    }
+
+location的匹配顺序：
+	1、＝   严格匹配这个查询，如果匹配到，则停止搜索  
+	2、~    匹配正则表达式,区分大小写
+	3、~*   匹配正则表达式,不区分大小写
+	4、!~*  取反
+
+    location ~* /status {
+        stub_status on;
+    } 
+注意:
+等号（＝）与( / )的对比，结论：等号的优先级别比( / )的高，(其实等号的优先级别是最高的)
+正则表达式的优先级别仅次于等号。
+如果正则表达式之间有冲突，则按照最详细的正则表达式优先匹配
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+
+
+[root@servera ~]# vim /etc/nginx/conf.d/default.conf 
+   location ~ ^/test\.html$ {
+        root   /usr/share/nginx/html;
+        index  index.html index.htm;
+    }
+
+[root@servera ~]# service nginx reload
+[root@servera ~]# echo test > /usr/share/nginx/html/test.html
+
+--测试----
+[root@foundation0 ~]# elinks http://www.test.com -dump
+   welcom to test.com
+[root@foundation0 ~]# elinks http://www.test.com/test.html -dump
+   test
+
+
+
+------------------------------------------------------------------
+
+
+加密连接https
+
+   CA机构
+   /    \     
+ 私钥---公钥
+
+设置（购买） CA机构证书
+通过CA机构的证书 ，生成网页的密钥对（私钥与公钥[证书]）
+
+
+环境:serverb作为CA中心,servera作为nginx配置ssl⻚页面面的web服务端
+(1)servera上创建私钥
+[root@servera ~]# mkdir /etc/nginx/key
+[root@servera ~]# cd /etc/nginx/key/
+[root@servera key]# openssl genrsa 2048 > servera-web.key
+
+2)生生成证书颁发请求
+
+[root@servera key]# openssl req -new -key servera-web.key -out servera-web.csr
+You are about to be asked to enter information that will be incorporated
+into your certificate request.
+What you are about to enter is what is called a Distinguished Name or a DN.
+There are quite a few fields but you can leave some blank
+For some fields there will be a default value,
+If you enter '.', the field will be left blank.
+-----
+Country Name (2 letter code) [XX]:CN
+State or Province Name (full name) []:GD
+Locality Name (eg, city) [Default City]:GZ
+Organization Name (eg, company) [Default Company Ltd]:UPLOOKING
+Organizational Unit Name (eg, section) []:IT
+Common Name (eg, your name or your server's hostname) []:www.uplooking.com  --域名（web服务器虚拟主机）
+Email Address []:web@uplooking.com
+
+Please enter the following 'extra' attributes
+to be sent with your certificate request
+A challenge password []:
+An optional company name []:
+
+(3)将证书颁发请求提交给CA中心(serverb模拟成CA中心)
+
+[root@servera key]# scp servera-web.csr 172.25.1.11:~
+
+
+(4) serverb模拟成CA,执行行自自签名操作
+[root@serverb ~]# setenforce 0
+
+[root@serverb ~]# openssl genrsa -des3 -out ca.key 4096
+Generating RSA private key, 4096 bit long modulus
+..................................................................................................................................................................................................................................................++
+.................................................................................................................................................................................................................++
+e is 65537 (0x10001)
+Enter pass phrase for ca.key:  --输入密码（redhat）
+Verifying - Enter pass phrase for ca.key:
+
+
+[root@serverb ~]# openssl req -new -x509 -days 3650 -key ca.key -out ca.crt
+Enter pass phrase for ca.key:
+You are about to be asked to enter information that will be incorporated
+into your certificate request.
+What you are about to enter is what is called a Distinguished Name or a DN.
+There are quite a few fields but you can leave some blank
+For some fields there will be a default value,
+If you enter '.', the field will be left blank.
+-----
+Country Name (2 letter code) [XX]:CN
+State or Province Name (full name) []:GD
+Locality Name (eg, city) [Default City]:GZ 
+Organization Name (eg, company) [Default Company Ltd]:
+Organizational Unit Name (eg, section) []:
+Common Name (eg, your name or your server's hostname) []:ca.uplooking.com
+Email Address []:
+
+
+(5)CA中心针对证书颁发请求创建证书
+
+[root@serverb ~]# openssl x509 -req -days 365 -in servera-web.csr -CA ca.crt -CAkey ca.key -set_serial 01 -out servera-web.crt
+Signature ok
+subject=/C=CN/ST=GD/L=GZ/O=UPLOOKING/OU=IT/CN=www.uplooking.com/emailAddress=web@uplooking.com
+Getting CA Private Key
+Enter pass phrase for ca.key:
+
+
+（6）证书回传给web服务与客户端
+[root@serverb ~]# scp servera-web.crt 172.25.1.10:/etc/nginx/key/
+
+（7） ssl的配置
+
+[root@servera key]# vim /etc/nginx/conf.d/uplooking.com.conf 
+server {
+    listen       443 ssl;  # https监听443端口
+    server_name  www.uplooking.com; 
+
+    ssl_certificate      /etc/nginx/key/servera-web.crt;  #证书存放位置
+    ssl_certificate_key  /etc/nginx/key/servera-web.key;  #私钥存放位置
+
+    ssl_session_cache shared:SSL:1m;
+    ssl_session_timeout  5m;
+
+    ssl_ciphers  HIGH:!aNULL:!MD5;    
+#指出允许的密码，密码指定为openssl支持的格式
+    ssl_prefer_server_ciphers   on;
+#依赖SSLv3 和TLSv1 协议的服务器密码将优先于客户端密码
+        root   /usr/share/nginx/uplooking.com;  #定义网站根目录相关
+        index  index.html index.htm;
+}
+
+
+[root@servera key]# mkdir -p /usr/share/nginx/uplooking.com
+[root@servera key]# echo ssl > /usr/share/nginx/uplooking.com/index.html
+[root@servera key]# systemctl reload nginx
+
+
+测试访问:
+[root@foundation0 ~]# vim /etc/hosts
+172.25.1.10 www.uplooking.com
+
++++++++++++++++++++++++
+浏览器导入ca.crt证书
+++++++++++++++++++++++
+
+
+
+
+nginx的访问控制###
+ 基于帐号密钥认证：
+ 基于IP限制:
+ 基于内容的限制
+ deny *.txt
+ deny install/
+
+
+
+
+
+[root@servera key]# vim /etc/nginx/conf.d/default.conf 
+
+    location    /test.html {
+        root    /usr/share/nginx/html;
+        index  index.html index.htm;
+        auth_basic "info";
+        auth_basic_user_file /usr/share/nginx/passwd.db;
+    }
+
+[root@servera key]# yum -y install httpd-tools
+[root@servera key]# htpasswd -cm /usr/share/nginx/passwd.db user01
+New password: 
+Re-type new password: 
+Adding password for user user01
+
+----------------------------------------------------
+
+ 拒绝172.25.1.11访问
+
+
+    location / {
+        root   /usr/share/nginx/test.com;
+        index  index.html index.htm;
+        deny 172.25.1.11;
+        deny 172.25.254.0/24;
+    }
+
+-------------------------------------------------
+拒绝.txt或者.doc结尾文件
+    location ~* .(txt|doc)$ {
+        deny all;
+   }
+
+拒绝某个目录
+    location /install {
+        deny all;
+    }
+
+
+
+
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+nignx的rewrite规则###
+rewrite简介###
+  所谓rewrite规则,实际指的是地址重写技术。在生生产环境里里,出于某些原因,我们希望用用户输入入的url地址和对应请求文文件所在实际位置不一一致,然后通过服务端的配置将两者进行行映射,而而实现这种技术的方方式就称为地址重写
+
+
+rgs, 请求中的参数;
+$document_root, 针对当前请求的根路径设置值;
+$host, 请求信息中的"Host"，如果请求中没有Host行，则等于设置的服务器名;
+$limit_rate, 对连接速率的限制;
+$request_method, 请求的方法，比如"GET"、"POST"等;
+$remote_addr, 客户端地址;
+$remote_port, 客户端端口号;
+$remote_user, 客户端用户名，认证用;
+$request_filename, 当前请求的文件路径名
+$query_string, 与$args相同;
+$scheme, 所用的协议，比如http或者是https
+$server_protocol, 请求的协议版本，"HTTP/1.0"或"HTTP/1.1";
+$server_addr, 服务器地址，如果没有用listen指明服务器地址，使用这个变量将发起一次系统调用以取得地址(造成资源浪费);
+$server_name, 请求到达的服务器名;
+$document_uri 与$uri一样，URI地址;
+$server_port, 请求到达的服务器端口号;
+
+
+--------------------------------------匹配
+1)location:只匹配$path,不匹配主机名等其他信息
+2)if:可以匹配除路径以外的其他信息,如主机名、客户端ip等
+
+
+if ($hosts ~* ^www) {
+...;
+}
+
+
+        if ($http_host !~* ^www\.test\.com$) {
+                rewrite .* http://www.test.com break;
+        }
+
+DNS 泛域名解析  *.test.com.  A   172.25.1.10
+		  test.com.  A   172.25.1.10
+--------------
+$TTL 1D
+@       IN SOA  ns1.test.com. rname.invalid. (
+                                        0       ; serial
+                                        1D      ; refresh
+                                        1H      ; retry
+                                        1W      ; expire
+                                        3H )    ; minimum
+@       NS      ns1.test.com.
+ns1     A       172.25.1.11
+*       A       172.25.1.10
+test.com.  A      172.25.1.10
+---------------------
+
+
+
+server {
+	listen 80;
+	server_name *.test.com; 
+	if ( $http_host ~* "^www\.test\.com$") {
+		break;
+	}
+
+
+2.改写:
+rewrite    旧地址   新地址    标记位
+每行rewrite 指令最后应该根一个flag 标记，支持的flag 标记有如下四种最为常用：
+
+last      相当于Apache 里的[L]标记，表示完成rewrite。
+break 	  本条规则匹配完成后，终止匹配，不再匹配后面的规则
+redirect  返回302 临时重定向，浏览器地址会显示跳转后的URL 地址
+permanent 返回301 永久重定向，浏览器地址会显示跳转后URL 地址
+
+#### rewrite应用举例：
+
+1.用户在访问www.joy.com 网站的news 目录时，我这个目录还在建设中，那么想要实现的就是用户访问该目录下
+任何一个文件，返回的都是首页文件，给用户以提示。
+
+
+[root@servera ~]# mkdir /usr/share/nginx/joy.com
+[root@servera ~]# mkdir /usr/share/nginx/joy.com/news
+[root@servera ~]# echo joy > /usr/share/nginx/joy.com/index.html
+[root@servera ~]# echo building > /usr/share/nginx/joy.com/news/index.html
+
+[root@servera ~]# cd /usr/share/nginx/joy.com/news/
+[root@servera news]# touch new1.html
+[root@servera news]# touch new2.html
+
+[root@servera ~]# cat /etc/nginx/conf.d/www.joy.com.conf 
+server {
+listen 80;
+server_name www.joy.com;
+#charset koi8-r;
+#access_log /var/log/nginx/log/host.access.log main;
+root /usr/share/nginx/joy.com;
+index index.html index.htm;
+location ~* /news/ {
+rewrite ^/news/.* /news/index.html break;
+ }
+}
+
+
+[root@servera ~]# service nginx restart
+
+[root@serverb ~]# elinks http://www.joy.com/news/new1.html
+
+
+2.用户在访问www.joy.com 网站时访问地址如果为/uplook/11-22-33.html 重写后真实地址为/uplook/11/22/33.html
+注：做URI 重写时，有时会发现URI 中含有相关参数，如果需要将这些参数保存下来，并且在重写过程中重新引用，我们可以用到( )进行保存和$N 进行引用的方式，最多保存9个字段。
+
+www.joy.com/uplook/11-22-33.html ---> /uplook/11/22/33.html
+
+
+字符，+表示匹配前一字符1 次及1 次以上，\表示转义，（）用于字符串保存，$表示以某个字符串结尾，新地址中$用于引用
+保存的内存，$1 表示第一个被保存的字符串，依次类推。
+
+
+[root@servera ~]# vim /etc/nginx/conf.d/www.joy.com.conf 
+location ~* /uplook {
+rewrite  ^/uplook/([0-9]+)-([0-9]+)-([0-9]+)\.html$ /uplook/$1/$2/$3.html last;
+}
+
+[root@servera ~]# service nginx restart
+
+[root@servera ~]# mkdir /usr/share/nginx/uplook/11/22/ -p
+[root@servera ~]# echo 11-22-33 > /usr/share/nginx/uplook/11/22/33.html
+
+
+
+++++++++++++++++自定义日志格式:+++++++++++++++++++++++++++++++++++++
+[root@servera ~]# vim /etc/nginx/nginx.conf 
+
+log_format  main1 '$remote_addr $remote_port $host $server_name $server_port $request $status $document_root $request_filename $query_string $scheme $server_protocol $document_uri';
+
+[root@servera ~]# vim /etc/nginx/conf.d/www.joy.com.conf 
+access_log /var/log/nginx/joy.access.log main1;
+
+[root@servera ~]# tail -f /var/log/nginx/joy.access.log  -n0
+172.25.254.250 37369 www.joy.com www.joy.com 80 GET /uplook/11-22-33.html HTTP/1.1 200 /usr/share/nginx/joy.com /usr/share/nginx/joy.com/uplook/11/22/33.html - http HTTP/1.1 /uplook/11/22/33.html
+++++++++++++++++++++++
+
+
+
+
+
+
+
+
+
+3.用户在访问tom.joy.com 网站时访问的实际位置为/usr/share/nginx/joy.com/tom 目录下的文件。
+
+```shell
+ [root@serverb ~]# vim /etc/nginx/conf.d/www.joy.com.conf
+ server {
+ 	listen 80;
+ 	server_name *.joy.com;
+ 	root /usr/share/nginx/joy.com;
+ 	index index.html index.htm;
+ 	if ( $http_host ~* ^www\.joy\.com$ ) {    
+ 		break;
+ 		}
+ 		#如果用户访问的是www.joy.com，则不做rewrite
+ 	if ( $http_host ~* ^(.*)\.joy\.com$ ) {    
+ 		set $domain $1;	
+ 		rewrite /.* /$domain/index.html break;
+ 	}
+ #将用户输入的.joy.com 之前的字符串保存并将保存的内存赋值给domain 变量
+ }
+ #创建测试文件
+[root@serverb ~]# cd /usr/share/nginx/joy.com/
+[root@serverb joy.com]# mkdir tom
+[root@serverb joy.com]# echo tom > tom/index.html
+[root@serverb ~]# systemctl restart nginx.service
+
+
+
+------------------------------------------------------------------------------------------------------------
+Nginx proxy 是Nginx 的王牌功能,利用用proxy 基本可以实现一个完整的7 层负载均衡,它有这些特色色:
+
+1. 功能强大大,性能卓越,运行行稳定。
+2. 配置简单灵活。
+3. 能够自动剔除工作不正常的后端服务器。
+4. 上传文文件使用用异步模式。
+5. 支支持多种分配策略,可以分配权重,分配方方式灵活。
+
+
+1.前端serverb一一台nginx反向代理服务器,后端serverc作为apache服务器。
+
+[root@serverc ~]# setenforce 0
+[root@serverc ~]# yum -y install httpd
+[root@serverc ~]# echo serverc1-webserver > /var/www/html/index.html
+[root@serverc ~]# service httpd start
+
+
+
+[root@serverb ~]# rpm -ivh ftp://172.25.254.250/notes/project/UP200/UP200_nginx-master/pkg/nginx-1.8.0-1.el7.ngx.x86_64.rpm
+
+
+[root@serverb ~]# vim /etc/nginx/conf.d/default.conf 
+
+server {
+    listen       80;
+    server_name  localhost;
+    location / {
+        proxy_pass http://172.25.1.12;
+    }
+}
+
+[root@serverb ~]# service nginx start
+
+
+[root@foundation0 ~]# elinks http://172.25.1.11 -dump
+   serverc1-webserver
+
+
+2.后台server 是两台或两台以上,如下实验中,serverc 和serverd 都是由serverb 机器代理的服务器。
+[root@serverd ~]# yum -y install httpd
+[root@serverd ~]# echo serverd1-webserver > /var/www/html/index.html
+[root@serverd ~]# service httpd start
+
+
+---配置反向代理服务器
+[root@serverb ~]# vim /etc/nginx/nginx.conf 
+    upstream apache-servers {
+        server 172.25.1.12:80;
+        server 172.25.1.13:80;
+    }
+
+ 	#HTTP 负载均衡模块。upstream 这个字段设置一群服务器，可以将这个字段放在proxy_pass 和fastcgi_pass 指令中作为一个单独的实体，它们可以是监听不同端口的服务器，并且也可以是同时监听TCP 和Unix socket 的服务器。服务器可以指定不同的权重，默认为1（依次轮询）
+
+[root@serverb ~]# vim /etc/nginx/conf.d/www.proxy.com.conf
+location / {
+      proxy_pass http://apache-servers;
+#确定需要代理的URL，端口或socket。
+      proxy_set_header Host $host;
+#这个指令允许将发送到后端服务器的请求头重新定义或者增加一些字段。这个值可以是一个文本，变量或者它们的组合。
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_next_upstream error timeout invalid_header http_500 http_502 http_503 http_504 http_404;
+      proxy_set_header X-Real-IP $remote_addr;
+}
+
+
+[root@serverb ~]# service nginx restart
+
+---测试------
+[root@foundation0 ~]# elinks http://172.25.1.11 -dump
+   serverc1-webserver
+[root@foundation0 ~]# elinks http://172.25.1.11 -dump
+   serverd1-webserver
+
+------------------------nginx调度算法-----------------------------
+分配方方式:
+1.轮询(默认) 每个请求按时间顺序逐一分配到不同的后端服务器,如果后端服务器down 掉,能自自动剔除。
+    upstream apache-servers {
+        server 172.25.1.12:80 ;
+        server 172.25.1.13:80 ;
+    }
+
+
+2.weight: 权重分配方方式:指定轮询几率,weight 和访问比率成正比,用用于后端服务器性能不均的情况。
+
+
+    upstream apache-servers {
+        server 172.25.1.12:80 weight=1;
+        server 172.25.1.13:80 weight=2;
+    }
+
+
+ 3.ip_hash
+每个请求按访问ip 的hash 结果分配,这样每个访客固定访问一个后端服务器,可以解决session 的问题
+    upstream apache-servers {
+        ip_hash;
+        server 172.25.1.12:80 weight=1;
+        server 172.25.1.13:80 weight=1;
+    }
+
+-------------------------------------------------------------------------------------------------
+
+
+Nginx 缓存
+ nginx也可以作为一个缓存服务器存在,主要是针对一些经常被访问的页面进行缓存的操作,从而而减轻后端web服务器的压力
+
+[root@serverb ~]# vim /etc/nginx/nginx.conf 
+
+    proxy_temp_path /usr/share/nginx/proxy_temp_dir 1 2;
+    proxy_cache_path /usr/share/nginx/proxy_cache_dir levels=1:2 keys_zone=cache_web:50m inactive=1d max_size=30g;
+
+    upstream apache-servers {
+        server 172.25.1.12:80 weight=1;
+        server 172.25.1.13:80 weight=1;
+    }
+
+[root@serverb ~]#  mkdir -p /usr/share/nginx/proxy_temp_dir /usr/share/nginx/proxy_cache_dir
+[root@serverb ~]# chown nginx /usr/share/nginx/proxy_temp_dir/ /usr/share/nginx/proxy_cache_dir/
+
+
+[root@serverb ~]# vim /etc/nginx/conf.d/www.proxy.com.conf
+
+server {
+    listen       80;
+    server_name  www.proxy.com;
+location / {
+proxy_pass http://apache-servers;
+proxy_set_header Host $host;
+proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+proxy_next_upstream error timeout invalid_header http_500 http_502 http_503 http_504 http_404;
+proxy_set_header X-Real-IP $remote_addr;
+proxy_redirect off;
+client_max_body_size 10m;
+client_body_buffer_size 128k;
+proxy_connect_timeout 90;
+proxy_send_timeout 90;
+proxy_read_timeout 90;
+proxy_cache cache_web;
+proxy_cache_valid 200 302 12h;
+proxy_cache_valid 301 1d;
+proxy_cache_valid any 1h;
+proxy_buffer_size 4k;
+proxy_buffers 4 32k;
+proxy_busy_buffers_size 64k;
+proxy_temp_file_write_size 64k;
+}
+}
+
+
+
+
+[root@foundation0 ~]# elinks http://www.proxy.com -dump
+   serverc1-webserver
+[root@foundation0 ~]# elinks http://www.proxy.com -dump
+   serverc1-webserver
+ ----关闭serverc httpd服务  --仍然访问到web服务器内容（nginx缓存的数据）
+[root@serverb conf.d]# find /usr/share/nginx/proxy_cache_dir/
+/usr/share/nginx/proxy_cache_dir/
+/usr/share/nginx/proxy_cache_dir/4
+/usr/share/nginx/proxy_cache_dir/4/31
+/usr/share/nginx/proxy_cache_dir/4/31/137c9e8c8601cce3f821bf4ee2e6331
+
+
+
+

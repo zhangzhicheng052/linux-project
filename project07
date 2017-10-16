@@ -1,0 +1,1608 @@
+反向代理服务器           nginx  
+缓存静态的反向代理服务器 squid  varnish
+
+
+ 
+
+nginx 反向代理
+
+
+		client  10.1.1.x
+
+
+
+		nginx	10.1.1.8
+
+
+       		web1		web2
+	   10.1.1.9:8000	10.1.1.10
+              lnmp
+
+
+第一步，在nginx反向代理服务器上安装nginx，过程可以和装lnmp时一模一样
+
+# yum -y install gcc pcre-devel openssl-devel
+
+# useradd -r -d /dev/null -s /bin/false nginx		--我这里建立一个用户来跑nginx，不做也可以，它默认是用daemon用户来跑
+
+# id nginx		--nginx的uid,gid无所谓是多少
+uid=517(nginx) gid=518(nginx) groups=518(nginx)
+
+# tar xf nginx-1.8.0.tar.gz -C /usr/src/
+# cd /usr/src/nginx-1.8.0/
+
+
+# ./configure --prefix=/usr/local/nginx --user=nginx --group=nginx --with-http_gzip_static_module  --with-http_stub_status_module 
+
+# make ;make install
+
+
+
+-----------------------------------------------------------------
+
+
+
+--注意：下面这五个例子，是以静态页面来做测试，如果现在讨论动态页面（比如登录相关），下面的配置并不完整;并且这五个例子都是同网段做，如果换成双网段（后台web在内网）则会出现问题，需要使用后面综合例子里的proxy_set_header等指令来辅助
+
+
+例一:使用前端nginx代理后面一台web
+
+			client	10.1.1.x
+			
+
+
+			nginx 	10.1.1.8
+
+
+
+       			web1	
+	  	    10.1.1.9:8000
+
+
+
+[root@li nginx]# cat /usr/local/nginx/conf/nginx.conf
+user  nginx nginx;
+worker_processes  4;
+error_log  logs/error.log  info;
+pid        logs/nginx.pid;
+
+events {
+    use epoll;
+    worker_connections  65535;
+}
+
+http {
+    server {
+        listen       80;
+        server_name  10.1.1.8;
+	root /nginxroot/;
+
+        location /web1/ {
+		proxy_pass http://10.1.1.9:8000/;	
+		}
+	}
+}
+
+
+# mkdir /nginxroot/
+# echo "nginx main page" > /nginxroot/index.html
+
+
+--启动
+# ulimit -SHn 65535
+# /usr/local/nginx/sbin/nginx
+
+
+
+--验证
+找另一台客户端机器验证
+# elinks 10.1.1.8		--得到10.1.1.8上nginx的主页	
+# elinks 10.1.1.8/web1/	--得到10.1.1.9上8000端口的web1主页(但你可以去尝试做一下登录操作是不可以的。或者点注册，会发现它的路径跳转到了10.1.1.9:8000;也就是说这个做法只是简单测试，并不实用。在后面的综合例子里我们再讨论）
+
+
+
+例二:使用前端nginx代理后端两台web,一个代理后台10.1.1.9的8000端口的web1,一个代理后台10.1.1.10的80端口的web2
+
+			client  10.1.1.x
+
+
+
+			nginx	10.1.1.8:80
+
+
+
+       		web1			web2
+	   10.1.1.9:8000		10.1.1.10:80
+
+
+
+# cat /usr/local/nginx/conf/nginx.conf
+user  nginx nginx;
+worker_processes  4;
+error_log  logs/error.log  info;
+pid        logs/nginx.pid;
+
+events {
+    worker_connections  65535;
+    use epoll;
+}
+
+http {
+    server {
+        listen       80;
+        server_name  10.1.1.8;
+	root  /nginxroot/;
+
+        location /web1/    {
+		proxy_pass http://10.1.1.9:8000/;
+       		 }
+        location /web2/ {
+		proxy_pass http://10.1.1.10/;
+       		 }
+	}
+}
+
+
+重启
+[root@li nginx]# /usr/local/nginx/sbin/nginx -s stop
+[root@li nginx]# /usr/local/nginx/sbin/nginx 
+
+
+
+验证
+# elinks 10.1.1.8	
+# elinks 10.1.1.8/web1/
+# elinks 10.1.1.8/web2/
+
+
+
+
+
+例三:基于文件类型的反向代理(可用于做动静分离）
+
+[root@li nginx]# cat conf/nginx.conf
+user  nginx nginx;
+worker_processes  4;
+error_log  logs/error.log  info;
+pid        logs/nginx.pid;
+
+events {
+    use epoll;
+    worker_connections  65535;
+}
+
+http {
+
+    server {
+        listen       80;
+        server_name  10.1.1.8;
+	root /nginxroot/;
+
+        location /images/ {
+		proxy_pass http://10.1.1.10/;   --这里后面得加/	
+		}
+        location ~ \.(txt|php)$ {
+		proxy_pass http://10.1.1.9:8000;	--这里后面不能加/	
+		}
+	}
+}
+
+
+--这里是做的七层代理,上面的配置表示访问10.1.1.8/images/时会调给后面的10.1.1.10的80端口;访问任何以.txt或.php结尾的文件时会调给10.1.1.9的8000端口;其它的由10.1.1.8的nginx自己解析
+
+
+
+# elinks http://10.1.1.8/ -dump
+ nginx-proxy
+# elinks http://10.1.1.8/images -dump
+   web2
+# elinks http://10.1.1.8/test.txt -dump
+   web1-xx
+
+
+重启  (省略)
+验证  (省略)
+
+
+
+例四:代理后端时使用负载均衡
+
+
+# cat /usr/local/nginx/conf/nginx.conf
+user  nginx nginx;
+worker_processes  4;
+error_log  logs/error.log  info;
+pid        logs/nginx.pid;
+
+events {
+    worker_connections  65535;
+    use epoll;
+}
+
+http {
+
+upstream backendweb {
+	server 10.1.1.9:8000 weight=1 max_fails=2 fail_timeout=1s;
+	server 10.1.1.10:80 weight=1 max_fails=2 fail_timeout=1s;
+        }
+
+
+    server {
+        listen       80;
+        server_name  10.1.1.8;
+	root  /nginxroot/;
+
+        location ~ \.(txt|php)$ {
+		proxy_pass http://backendweb;	
+		}
+	}
+}
+
+在后端web服务器新建a.txt文件
+[root@web1 ~]# echo test-web1 > /webserver/bbs1/a.txt
+[root@web2 ~]# echo test-web2 > /var/www/html/a.html
+
+
+[root@c1 ~]# elinks http://172.25.1.14/a.txt -dump
+   test-web1
+[root@c1 ~]# elinks http://172.25.1.14/a.txt -dump
+   test-web2
+
+
+
+
+--上面配置的意思是:.txt或.php结尾的文件都去均衡的调度给10.1.1.9的8000端口和10.1.1.10的80端口;其它的由10.1.1.8的nginx自己解析
+
+--upstream指令不要加到http {} 外面，也不要加到server{}里面
+p_has
+
+
+重启  (省略)
+验证  (省略)
+
+--验证时，会发现客户端针对同一个URL的访问也会一次web1一次web2，这说明nginx默认并没有squid或varnish那样的缓存功能
+
+
+
+
+例五:使用ip_hash，实现同一IP客户端一旦调到一台，就一直调那一台
+
+# cat /usr/local/nginx/conf/nginx.conf
+user  nginx nginx;
+worker_processes  4;
+error_log  logs/error.log  info;
+pid        logs/nginx.pid;
+
+events {
+    worker_connections  65535;
+    use epoll;
+}
+
+http {
+
+upstream backendweb {
+	ip_hash;		--加上这句
+	server 10.1.1.9:8000 weight=1 max_fails=2 fail_timeout=1s;
+	server 10.1.1.10:80 weight=1 max_fails=2 fail_timeout=1s;
+        }
+
+
+
+    server {
+        listen       80;
+        server_name  10.1.1.8;
+	root  /nginxroot/;
+
+        location ~ \.(txt|php)$ {
+		proxy_pass http://backendweb;	
+		}
+	}
+}
+
+--nginx的ip_hash的意思是,如果一个客户端的访问被调度到其中一台后台服务器,那么同一个IP来的访问都只会被调到这个后台服务器；这里测试时，如果都用同一个网段的内网IP来做客户端测试，可能会都只转到一个后台（因为nginx的hash算法是按网段来算的，如果是公网不同网段的客户端IP就不一样了）
+
+
+重启  (省略)
+验证  (省略)
+				
+
+
+对于nginx的upstrem算法总结:
+1,round-robin	轮循（平均分配）
+2,weight	权重（人为地分配权重，用于后台服务器性能不均的情况）
+3,fair		响应时间（按后台的响应时间来分配，需要第三模块，但如果后台服务器都在内网，就没太大必要使用这种算法了）
+4,url_hash	按访问url的hash结果来分配请求，使每个url定向到同一个后端服务器，后端服务器为多台缓存时比较有效，提高缓存命中率（后面例子会讲）
+
+
+
+===================================================================
+
+
+
+			 CDN
+
+			client	  1.1.1.129		
+			  |
+			  |	     1.1.1.128
+		      nginx 反向代理   
+			  ｜	     10.1.1.8
+			  ｜
+		   －－－－－－－－－－－
+		  ｜		    ｜	 命中  hit 直接返回	
+动态程序文件.php	  ｜		    | 
+		  ｜            squid或varnish（web加速，缓存静态文件或图片) 
+直接找web	  ｜		    |			
+		   －－－－	    |    没命中 miss 找后端web去取
+			 ｜	    |	 10.1.1.10
+			lnmp  <---- |	 
+						     
+		      10.1.1.9:8000
+			li.cluster.com
+
+
+
+实验前准备：
+1，互相都在/etc/hosts里加主机名和IP的对应(三步)
+下面我以squid机器的主机名配置为例
+# hostname squid.cluster.com	--马上生效，临时修改
+
+# vim /etc/sysconfig/network
+NETWORKING=yes
+HOSTNAME=squid.cluster.com	--改在这里，重启仍然生效
+
+# vim /etc/hosts		--在这个文件，绑定架构里所有的机器的IP和主机名的对应，但不要修改默认的最前面的两行
+127.0.0.1   localhost localhost.localdomain localhost4 localhost4.localdomain4
+::1         localhost localhost.localdomain localhost6 localhost6.localdomain6
+10.1.1.9    li.cluster.com
+10.1.1.10    squid.cluster.com
+10.1.1.8    nginx.cluster.com
+
+
+2，时间同步
+在宿主机上搭建简单的内网时间同步服务器
+# yum install xinetd -y
+# vim /etc/xinetd.d/time-stream
+	disable = no   --yes改为no
+# vim /etc/xinetd.d/time-dgram 
+	disable = no   --yes改为no
+# /etc/init.d/xinetd restart
+# chkconfig xinetd on
+	
+# netstat -ntlup |grep :37	--端口为37
+tcp        0      0 :::37                       :::*                        LISTEN      28330/xinetd        
+udp        0      0 :::37                       :::*                                    28330/xinetd  
+
+所有的需要同步时间的机器都使用下面的命令同步宿主机 (还可以放到crontab时间任务里周期性同步）
+	rdate -s 10.1.1.9
+
+
+3，关闭iptables和selinux
+# iptable -F
+# iptables -t nat -F
+# iptables -t mangle -F
+# /etc/init.d/iptables save
+# chkconfig iptables on
+
+
+
+# setenforce 0	 --让selinux由enforcing强制模式改为Permissive警告模式，临时生效
+# vim /etc/sysconfig/selinux	 
+SELINUX=disabled	--由enforcing改为disabled，那么重启机器后，selinux就会被永久关闭
+
+4, 配置好yum
+
+省略
+
+
+
+第一大步：在上图中的lnmp上安装并配置后面的网站
+
+把上次课的lnmp启动
+
+(过程省略)
+
+
+第二大步:在上图中的squid服务器上安装并配置squid
+
+1，安装squid
+# yum install squid* -y
+
+
+2,配置squid主配置文件
+# vim /etc/squid/squid.conf
+
+http_access allow all		--修改成允许所有
+http_port 3128 accel vhost vport  --修改成支持反向代理模式，端口不一定要改为80，因为我这个web架构，最前端的是nginx
+cache_dir ufs /var/spool/squid 256 16 256	--打开缓存目录的定义这一句
+
+
+cache_peer 10.1.1.9 parent 8000 0 no-query originserver name=web
+cache_peer_domain web web.cluster.com	--web.cluster.com就是我现在模拟的整个网站架构的域名
+cache_peer_domain web 1.1.1.128	--加上这三句,表示代理后台的lnmp的8000端口;web.cluster.com为网站的域名,1.1.1.128为我这个架构最前端的nginx的IP
+
+
+3,启动squid
+# /etc/init.d/squid restart
+
+
+第三大步:在上图中的nginx服务器上安装并配置nginx
+
+1,安装nginx
+
+省略
+
+2,配置nginx
+[root@nginx ~]# vim /usr/local/nginx/conf/nginx.conf
+
+user  nginx nginx;
+worker_processes  8;
+error_log  logs/error.log  info;
+pid        logs/nginx.pid;
+
+events {
+    worker_connections  65535;
+    use epoll;
+}
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+
+    log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                      '$status $body_bytes_sent "$http_referer" '
+                      '"$http_user_agent" "$http_x_forwarded_for"';
+    sendfile        on;
+    tcp_nopush     on;
+    keepalive_timeout  65;
+    gzip on;
+
+upstream squid {
+    server 10.1.1.10:3128 weight=1 max_fails=2 fail_timeout=3s;
+}
+
+upstream web {
+    server 10.1.1.9:8000 weight=1 max_fails=2 fail_timeout=3s;
+}
+
+
+    server {
+        listen       80;
+        server_name 1.1.1.128;
+	access_log  logs/access.log  main;
+
+       location ~ .*\.php$ {
+            proxy_pass   http://web;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-For $remote_addr;
+        }
+        location ~ .*\.(html|htm|gif|jpeg|jpg|css|js|png|swf)$ {
+            proxy_pass   http://squid;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-For $remote_addr;
+        }
+        location / {
+            proxy_pass   http://web;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-For $remote_addr;
+        }
+
+	}
+}
+
+
+
+
+--说明:下面这两句是做外网转内网双网段架构必需要加的
+proxy_set_header Host $host;
+proxy_set_header X-Forwarded-For $remote_addr;
+
+
+
+3,启动nginx
+# ulimit -SHn 65535
+# /usr/local/nginx/sbin/nginx -s stop
+# /usr/local/nginx/sbin/nginx 
+
+
+
+第四大步:验证
+
+
+在客户端机器1.1.1.129上首先绑定静态DNS 
+--用于模拟DNS，如果不绑定，也可以直接使用公网IP1.1.1.128来访问，因为在squid里配置了（cache_peer_domain web web.cluster.com	和 cache_peer_domain web 1.1.1.128 两句)
+
+cat /etc/hosts
+1.1.1.128  web.cluster.com    --IP要为前端nginx的IP，名字为这个网站的域名要和squid里的cache_peer_domain web web.cluster.com要对应
+
+
+
+1,在客户端用firefox访问http://web.cluster.com/或http://1.1.1.128/是可以正常看到我的lnmp的8000端口安装的discuz论坛
+
+
+
+2,在客户端使用下面的命令验证discuz论坛的一个logo,可以看到在squid上命中的信息
+# curl -I http://web.cluster.com/static/image/common/logo.png
+
+HTTP/1.1 200 OK
+Server: nginx/1.8.0
+Date: Mon, 23 Nov 2015 08:10:09 GMT
+Content-Type: image/png
+Content-Length: 4425
+Connection: keep-alive
+Last-Modified: Tue, 09 Jun 2015 02:21:12 GMT
+ETag: "55764d98-1149"
+Accept-Ranges: bytes
+Age: 3227
+X-Cache: HIT from squid.cluster.com
+X-Cache-Lookup: HIT from squid.cluster.com:3128
+Via: 1.0 squid.cluster.com (squid/3.1.10)
+
+
+
+3,关闭squid,在客户端用firefox访问,会发现整个网站都没有图片(静态的元素)
+用curl -I  http://web.cluster.com/static/image/common/logo.png来验证也会报错
+
+因为我的架构里只有一台squid,再次启动squid后,一切又恢复正常
+
+
+
+4,在squid配置文件里加上
+# vim /etc/squid/squid.conf
+
+
+maximum_object_size 600 KB	--表示限制能缓存的文件最大大小为600k
+
+
+# /etc/init.d/squid stop
+# rm /var/spool/squid/* -rf	--手动这样删除缓存
+# squid -zX /var/spool/squid/   --再次创建缓存目录;当然这样清缓存肯定不是好方法
+# /etc/init.d/squid start
+
+
+先在lnmp服务器上dd创建两个文件一个大于600k,一个小于600k
+# dd if=/dev/zero of=test1.html bs=1k count=500
+# dd if=/dev/zero of=test2.html bs=1k count=700
+在客户端curl -I 接这两个文件的路径来测试，结果为大于600k的一直都是MISS（表示不缓存），小于600K的第一次MISS，之后都是HIT（表示缓存）
+
+
+
+5,关于squid清缓存
+
+# vim /etc/squid/squid.conf	--可以加上下面这四句;要注意的是这四句不能随便乱放,要放到acl的最后一个默认定义的下面;在rhel6.5的rpm版里就是大概在28行后面
+
+acl purge_admin src 127.0.0.1
+acl purge method PURGE
+http_access allow purge_admin purge
+http_access deny all purge
+
+
+# /etc/init.d/squid restart
+
+
+最基本的清除一条缓存的操作,必须要在10.1.1.10这台机器上执行
+# squidclient -m PURGE -h 127.0.0.1 -p 3128 http://1.1.1.128/static/image/common/logo.png
+
+-- -h参数后只能接127.0.0.1;-p 3128是squid的监听端口;最后的路径就是客户端访问的路径
+
+
+如果要批量清除squid,可以使用下面的脚本(你需要修改成自己对应的路径)
+
+vim /tmp/purge_squid.sh
+
+#!/bin/bash
+squidcache_path="/var/spool/squid/"
+squidclient_path="/usr/bin/squidclient"
+grep -a -r $1 $squidcache_path/* | strings | grep "http" | while read url
+do
+$squidclient_path -h 127.0.0.1 -m PURGE -p 3128 $url > /dev/null 2>&1
+done
+
+
+--注意：脚本的squidcache_path修改成你对应的缓存目录，squidclient_path修改成squidclient命令的路径；-h 127.0.0.1是因为我做了acl限制的，所以只能在squid本机上清除
+
+
+
+批量清除的方法:
+sh /tmp/purge_squid.sh .txt  --表示清除所有的.txt结尾的缓存
+sh /tmp/purge_squid.sh .     --表示清除所有缓存
+sh /tmp/purge_squid.sh /aaa/  --表示url里有/aaa/路径就清掉缓存
+
+
+6,关于后台web日志的里的客户端访问IP都是前端代理的IP的解决
+
+建议直接使用前端nginx的日志
+
+按访问url的hash结果来分配请求，使每个url定向到同一个后端服务器，后端服务器为缓存时比较有效
+
+======================================================================
+
+
+
+把上面架构图中的squid换成varnish
+
+
+				client
+				  |
+				  |
+			    |------------|		
+			    |    	 |
+			    |		varnish
+			    |		 |
+			    |------------|
+				  |
+				  |	
+				 lnmp
+
+
+1,停掉squid
+ /etc/init.d/squid stop
+2,安装varnish，使用rpm版
+软件包路径如下（下载地址为http://repo.varnish-cache.org/redhat/varnish-4.0/el6/x86_64/varnish/和http://dl.fedoraproject.org/pub/epel/6Server/x86_64/)
+软件包路径为笔记目录下project/software/varnish_soft
+jemalloc-3.6.0-1.el6.x86_64.rpm 
+varnish-4.0.3-1.el6.x86_64.rpm
+varnish-libs-4.0.3-1.el6.x86_64.rpm
+varnish-docs-4.0.3-1.el6.x86_64.rpm
+
+安装顺序
+# rpm -ivh jemalloc-3.6.0-1.el6.x86_64.rpm 
+# rpm -ivh varnish-4.0.3-1.el6.x86_64.rpm varnish-libs-4.0.3-1.el6.x86_64.rpm varnish-docs-4.0.3-1.el6.x86_64.rpm 
+
+
+
+3，配置rpm版varnish
+# vim /etc/sysconfig/varnish
+66 VARNISH_LISTEN_PORT=3128	--这是listen的端口，默认为6081,我这里改为3128，为了和前面的nginx调度的端口对应
+
+
+# vim /etc/varnish/default.vcl	  --配置主配置文件如下 
+vcl 4.0;
+
+backend lnmp {
+     .host = "10.1.1.9";
+     .port = "8000";
+}
+
+acl purgers {
+	"127.0.0.1";
+	"10.1.1.0"/24;
+}
+
+
+sub vcl_recv {
+  if (req.method == "PURGE") {
+    if (!client.ip ~ purgers) {
+      return(synth(405,"Method not allowed"));
+    }
+    return(hash);
+  }
+
+if (req.http.host  ~ "web.cluster.com") {
+        set req.backend_hint = lnmp ;
+        } else {
+          return(synth(404,"error domain name"));
+        }
+}
+
+sub vcl_miss {
+    return(fetch);
+}
+
+
+sub vcl_hit {
+  if (req.method == "PURGE") {  
+    unset req.http.cookie;
+    return(synth(200,"Purged"));
+  }
+}
+
+
+sub vcl_backend_response {
+  if (bereq.url ~ "\.(jpg|jpeg|gif|png)$") {
+    set beresp.ttl = 1d;
+  }
+  if (bereq.url ~ "\.(html|css|js)$") {
+    set beresp.ttl = 6h;
+  }
+  if (beresp.http.Set-Cookie) {
+    return(deliver);
+  }
+}
+
+
+
+sub vcl_deliver {
+  if (obj.hits > 0) {
+    set resp.http.X-Cache = "@_@ HIT from " + server.ip;
+  } else {
+    set resp.http.X-Cache = "@_@ oh,god,MISS";
+  }
+}
+
+
+4，启动varnish服务
+# /etc/init.d/varnish restart
+# lsof -i:3128
+# lsof -i:6082
+
+
+5,测试，客户端使用web.cluster.com这个域名来访问（不能使用IP，见varnish配置）
+
+
+
+=====================================================================
+
+			         DNS轮循
+
+		   nginx反向代理1	 nginx2反向代理2
+	     	 					
+		         squid1		 squid2
+
+			     lnmp+memcache			
+			
+
+
+
+			client
+			 |		
+			 |
+			nginx
+			 |
+			 |
+		 squid1	    squid2
+			 |
+			 |	
+			web
+
+		1.png		
+
+客户1访问1.png这个请求－－》nginx－－》算法调度squid1－－》squid miss－－》后台web取－－》返回给nginx再返回给client，并且squid1缓存了这个1.png的url请求
+
+客户2也访问1.png这个请求，那么应该通过算法也给squid1才能提高缓存命中率
+
+
+-------------------------------------------------------
+
+在上面的架构基础上多加一台squid2(我这里IP为10.1.1.6)
+
+				client 1.1.1.129
+				  |
+				  |	1.1.1.128
+				 nginx	
+				  |	10.1.1.8
+				  |
+			    |------------|		
+			    |    	 |
+			    |	   squid1  	squid2
+			    |	   10.1.1.10	10.1.1.6	 
+			    |------------|
+				  |
+				  |	
+				 lnmp
+			       10.1.1.9:8000
+
+
+做法，在nginx配置要修改的为下面一段
+upstream squid {
+    server 10.1.1.10:3128 weight=1 max_fails=2 fail_timeout=3s;
+    server 10.1.1.6:3128 weight=1 max_fails=2 fail_timeout=3s;
+}
+
+两台squid的配置有多种配法:
+1,可以配置icp协议，让其可以找sibling(简单来说，就是squid1找不到缓存，可以去找squid2的缓存）。配置方法参考上一次讲squid的笔记
+2，不配置icp协议，让nginx来调度。配置方法同上面的例子一样，并且两台squid配置也一致
+
+完成之后的验证方法为:
+在客户端用curl -I去测试多个不同的文件请求，看缓存情况,如:
+curl -I http://1.1.1.128/static/image/common/logo.png
+curl -I http://1.1.1.128/static/image/feed/task_b.png
+curl -I http://1.1.1.128/static/image/feed/album_b.png
+curl -I http://1.1.1.128/static/image/feed/portal_b.png
+curl -I http://1.1.1.128/static/image/feed/wall_b.png
+
+验证结果为:它把请求round-robin分配给squid1和squid2.
+
+但这个做法的缺点为:比如同一个url的请求，连续访问，它也会RR轮循给squid1和squid2，这样会造成两个squid重复缓存。
+
+改进的做法为:使用nginx的url_hash的算法，把同一个url的请求只给同一个后台squid，以提高缓存命中率。如果要做这个改进的话，只需要把nginx的配置再修改成如下:
+
+upstream squid {
+    server 10.1.1.10:3128 weight=1 max_fails=2 fail_timeout=3s;
+    server 10.1.1.6:3128 weight=1 max_fails=2 fail_timeout=3s;
+    hash $request_uri;
+}
+
+同理:可以把两台squid换成两台varnish(甚至一台squid和一台varnish，但不建议这么做)
+
+
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+课后扩展:
+======================================================================
+
+
+
+
+在上面的架构中，把squid或varnish去掉，由nginx又做反向代理，又做缓存（不太建议，加了缓存影响性能）
+nginx做缓存需要一个另外一个软件(ngx_cache_purge)
+下载的网址为:http://labs.frickle.com/files/ngx_cache_purge-2.3.tar.gz
+
+
+
+架构图，在上面做的基础上把squid或varnish去掉
+
+			client	 1.1.1.129		
+			  |
+			  |	  	1.1.1.128
+		      nginx 反向代理加缓存   
+			  |		10.1.1.7
+			  |
+			lnmp		
+				10.1.1.8:8000
+
+
+
+第一步:
+先把squid或varnish停掉
+再把刚做过的nginx给删除（因为需要重新编译）
+rm /usr/local/nginx/ -rf
+rm /usr/src/nginx-1.8.0/ -rf
+
+
+
+重新解压,重新编译
+软件包在笔记目录下/program/lnmp_soft/
+nginx-1.8.0.tar.gz
+ngx_cache_purge-2.3.tar.gz
+
+tar xf  nginx-1.8.0.tar.gz -C /usr/src/
+tar xf ngx_cache_purge-2.3.tar.gz -C /usr/src/
+cd /usr/src/nginx-1.8.0/
+./configure --prefix=/usr/local/nginx --user=nginx --group=nginx --with-http_gzip_static_module  --with-http_stub_status_module  --add-module=../ngx_cache_purge-2.3/
+make 
+make install
+
+--编译和以前几乎一样，只是多了一个--add-module=../ngx_cache_purge-2.3/参数，两个目录是同级目录（从编译的路径可以看出来）
+
+
+
+第二步：
+修改nginx主配置文件
+vim /usr/local/nginx/conf/nginx.conf
+
+user  nginx nginx;
+worker_processes  8;
+error_log  logs/error.log  info;
+pid        logs/nginx.pid;
+
+events {
+    worker_connections  65535;
+    use epoll;
+}
+
+http {
+    include       mime.types;
+    default_type  application/octet-stream;
+
+    log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                      '$status $body_bytes_sent "$http_referer" '
+                      '"$http_user_agent" "$upstream_cache_status"';
+    sendfile        on;
+    tcp_nopush     on;
+    keepalive_timeout  65;
+    gzip on;
+
+    proxy_temp_path   /usr/local/nginx/proxy_temp_dir 1 2;
+    proxy_cache_path  /usr/local/nginx/proxy_cache_dir/cache  levels=1:2 keys_zone=cache:100m inactive=1d max_size=10g;	
+
+upstream web {
+    server 10.1.1.9:8000 weight=1 max_fails=2 fail_timeout=30s;
+}
+
+
+    server {
+        listen       80;
+        server_name  1.1.1.128;
+	access_log  logs/host.access.log  main;
+
+        location / {
+            proxy_pass   http://web;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-For $remote_addr;
+	    proxy_cache cache;
+	    proxy_cache_key $host$uri$is_args$args;
+	    proxy_cache_valid 200 304 10m;	
+            add_header X-Cache '$upstream_cache_status from $host';
+	    expires 1d;
+        }
+        location ~ .*\.(php|cgi)$ {
+            proxy_pass   http://web;
+            proxy_set_header Host $host;
+            proxy_set_header X-Forwarded-For $remote_addr;
+        }
+
+	}
+}
+
+
+
+上面的配置参数说明
+1、http段设置。
+proxy_temp_path /usr/local/nginx/proxy_temp_dir;  --设置临时目录
+proxy_cache_path /usr/local/nginx/proxy_cache_dir/cache levels=1:2 keys_zone=cache:100m inactive=1d max_size=10g;
+--keys_zone=cache1:100m 表示这个zone名称为cache1，分配的内存大小为100MB
+--/usr/local/nginx/proxy_cache_dir/cache1 表示cache1这个zone的文件要存放的目录
+--levels=1:2 表示缓存目录的第一级目录是1个字符，第二级目录是2个字符，即/usr/local/nginx/proxy_cache_dir/cache/a/1b这种形式
+--inactive=1d 表示这个zone中的缓存文件如果在1天内都没有被访问，那么文件会被cache manager进程删除掉
+--max_size=10g 表示这个zone的硬盘容量为10GB
+2、server段设置
+proxy_cache cache;  --设置缓存共享内存区块，也就是keys_zone名称
+proxy_cache_key $host$uri$is_args$args; --设置缓存key
+proxy_cache_valid 200 304 10m; --设置http状态码为200,304缓存时间为10分钟
+add_header X-Cache '$upstream_cache_status from $host';				--$upstream_cache_status表示资源缓存的状态，有HIT MISS EXPIRED三种状态
+expires 1d; --设置失期时间，为1天
+
+保存主配置文件后，建立对应的缓存目录
+mkdir /usr/local/nginx/proxy_cache_dir/cache -p
+ls /usr/local/nginx/proxy_cache_dir/cache
+
+启动nginx
+/usr/local/nginx/sbin/nginx
+
+
+
+第三大步：
+客户端测试
+
+1，使用下面的命令访问
+＃ curl -I http://1.1.1.128/static/image/common/logo.png
+HTTP/1.1 200 OK
+Server: nginx/1.8.0
+Date: Mon, 25 Aug 2014 18:36:33 GMT
+Content-Type: image/png
+Content-Length: 2511
+Connection: keep-alive
+Last-Modified: Wed, 20 Mar 2013 02:19:36 GMT
+ETag: "51491cb8-9cf"
+Accept-Ranges: bytes
+Expires: Tue, 26 Aug 2014 18:36:33 GMT
+Cache-Control: max-age=86400
+X-Cache: MISS from 10.2.2.11		--第一次MISS
+
+
+# curl -I http://1.1.1.128/static/image/common/logo.png
+HTTP/1.1 200 OK
+Server: nginx/1.8.0
+Date: Mon, 25 Aug 2014 18:36:44 GMT
+Content-Type: image/png
+Content-Length: 2511
+Connection: keep-alive
+Last-Modified: Wed, 20 Mar 2013 02:19:36 GMT
+ETag: "51491cb8-9cf"
+Expires: Tue, 26 Aug 2014 18:36:44 GMT
+Cache-Control: max-age=86400
+X-Cache: HIT from 10.2.2.11
+Accept-Ranges: bytes		--第二次HIT
+
+2，在客户端用户firefox访问http://1.1.1.128/,可以访问整个discuz论坛
+在nginx上查看缓存目录，会看到很多子目录（缓存都在这些目录里)
+ls /usr/local/nginx/proxy_cache_dir/cache
+0  1  2  3  5  6  7  9  a  b  d  e  f
+
+
+
+3,nginx的缓存清除
+
+在nginx服务器写一个脚本，如下
+# vim /tmp/purge_nginx_cache.sh
+#!/bin/bash
+cachedir=/usr/local/nginx/proxy_cache_dir/cache
+
+grep -ra  $1 $cachedir |grep $1 | awk -F':' '{print $1,$3}'|while read cacheurl url
+do
+	rm  -rf  $cacheurl
+        echo "$url"
+done
+echo "缓存清除成功"
+
+清除方法为
+sh /tmp/purge_nginx_cache.sh .png$   --清除所有的.png结尾的缓存
+
+
+
+
+
+
+
+===================================================================
+
+
+
+
+
+
+把squid换成varnish来实现反向代理
+
+www.varnish-cache.org
+
+			       client	张三
+				 |
+				 |
+			      varnish   李四
+				 | 	
+				 |
+				web	王五   ftp,https  马六
+
+ 
+pass  当vcl_recv调用 pass 函数时，pass将当前请求直接转发到后端服务器。而后续的请求仍然通过varnish处理。
+pipe  而pipe模式则不一样，当vcl_recv判断 需要调用 pipe 函数时，varnish会在客户端和服务器之间建立一条直接的连接 ，之后客户端的所有请求都直接发送给服务器，绕过varnish,不再由varnish检查请求，直到连接断开。
+
+
+vcl_recv  --> vcl_pipe 
+vcl_recv  --> vcl_pass
+
+vcl_recv  --> lookup (hash)  -->  vcl_miss --> vcl_fetch(vcl_backend_response) --> vcl_deliver
+vcl_recv  --> lookup (hash)  -->  vcl_hit  -->  vcl_deliver
+
+
+
+
+			client	172.16.2.x
+			  |
+			  |
+				172.16.2.8    
+			varnish		
+				192.168.1.1
+			  |
+			  |
+		|---------------------| 
+	      web1		     web2		
+	    192.168.1.128		  192.168.1.129	
+
+软件包路径在 笔记目录/program/varnish_soft/ 
+
+
+----------------------------------------------
+4.0.3版本的源码编译安装方法（仅做参考，下面使用rpm版本来做)
+
+yum install pcre-devel
+
+tar xf docutils-0.12.tar.gz -C /usr/src/
+cd /usr/src/docutils-0.12/
+python setup.py install
+
+tar xf varnish-4.0.3.tar.gz -C /usr/src/
+cd /usr/src/varnish-4.0.3/
+./configure --prefix=/usr/local/varnish
+make
+make install
+
+cp /usr/local/varnish/share/man/man7/vcl.7 /usr/share/man/man7/
+------------------------------------------------
+
+4.0.3版本的rpm版安装方法:
+软件包路径如下（下载地址为http://repo.varnish-cache.org/redhat/varnish-4.0/el6/x86_64/varnish/和http://dl.fedoraproject.org/pub/epel/6Server/x86_64/)
+软件包主要为下面几个
+jemalloc-3.6.0-1.el6.x86_64.rpm 
+varnish-4.0.3-1.el6.x86_64.rpm
+varnish-libs-4.0.3-1.el6.x86_64.rpm
+varnish-docs-4.0.3-1.el6.x86_64.rpm
+
+安装顺序
+# rpm -ivh jemalloc-3.6.0-1.el6.x86_64.rpm 
+# rpm -ivh varnish-4.0.3-1.el6.x86_64.rpm varnish-libs-4.0.3-1.el6.x86_64.rpm varnish-docs-4.0.3-1.el6.x86_64.rpm 
+
+
+配置rpm版varnish
+# vim /etc/sysconfig/varnish
+66 VARNISH_LISTEN_PORT=80	--这是listen的端口，默认为6081,我这里改为80（因为我的varnish在这里为最前端)
+69 VARNISH_ADMIN_LISTEN_ADDRESS=127.0.0.1   --管理端口的监听地址，保持默认值
+70 VARNISH_ADMIN_LISTEN_PORT=6082	--管理端口，我这里保持默认值
+
+
+
+
+例1:varnish直接代理后台一个web服务器
+		
+
+			client	172.16.2.x
+			  |
+			  |
+				172.16.2.8
+			varnish
+				192.168.1.1
+			  |
+			  |
+			  |
+	                web1		   
+	              192.168.1.128		 
+
+配置rpm版本主配置文件
+# vim /etc/varnish/default.vcl	
+
+vcl 4.0;			--4.0.3版本，必须要加这一句指定为4.0版的vcl语法
+
+backend web1 {
+     .host = "192.168.1.128";
+     .port = "80";
+}
+
+
+启动varnish服务
+# /etc/init.d/varnish start
+(--或者直接使用命令来启动:# varnishd -f /etc/varnish/default.vcl -a 0.0.0.0:80 -s malloc -T 127.0.0.1:6082)
+
+# lsof -i:80
+# lsof -i:6082
+
+   
+
+客户端可以通过elinks 172.16.2.8或者curl -I 172.16.2.8的方法来验证
+
+
+
+例2：varnish代理后台两个不同域名的web服务器
+
+			client	172.16.2.x
+			  |
+			  |
+				172.16.2.8
+			varnish
+				192.168.1.1
+			  |
+			  |
+		|---------------------|
+	      web1		     web2
+	    192.168.1.128		  192.168.1.129
+	www.aaa.com		 www.bbb.com
+
+
+# vim /etc/varnish/default.vcl 
+
+vcl 4.0;
+
+backend web1 {
+     .host = "192.168.1.128";
+     .port = "80";
+}
+backend web2 {
+     .host = "192.168.1.129";
+     .port = "80";
+}
+
+sub vcl_recv {
+if (req.http.host ~ "aaa.com$") {
+        set req.backend_hint = web1;		
+        } else {
+        set req.backend_hint = web2;
+        }
+}
+
+--上面表示访问以aaa.com结尾的域名请求会给web1，bbb.com结尾的域名请求会给web2
+
+
+	
+重启varnish服务
+# /etc/init.d/varnish restart
+
+
+
+测试
+在客户端
+cat /etc/hosts
+172.16.2.8 www.aaa.com
+172.16.2.8 www.bbb.com
+# elinks www.aaa.com/1   --访问此域名的都会显示web1的内容
+# elinks www.bbb.com/1	 --都会显示web2的内容
+
+
+
+扩展，如果这两个网站是做的虚拟主机，那么依不同类型的虚拟主机（基于IP，基于端口，基于域名），配置方法不一样
+
+就基于域名的写法如下（基于IP和端口的就不例举了）
+
+backend web1 {
+     .host = "192.168.1.128";	--这里用IP，也可以写www.aaa.com
+     .port = "80";
+}
+backend web2 {
+     .host = "192.168.1.128";	--这里用IP，也可以写www.bbb.com
+     .port = "80";
+}
+
+
+
+例3：实现代理同一个网站内容分割，如www.aaa.com/sports/和www.aaa.com/news/会把请求分发给不同的后台web
+
+
+			client	172.16.2.x
+			  |
+			  |
+				172.16.2.8
+			varnish
+				192.168.1.1
+			  |
+			  |
+		|---------------------|
+	      web1		     web2
+	    192.168.1.128:8001		  192.168.1.129:80
+	www.aaa.com/sports/	www.aaa.com/news/	
+
+ 
+vcl 4.0;
+
+backend web1 {
+     .host = "192.168.1.128";
+     .port = "8001";
+}
+backend web2 {
+     .host = "192.168.1.129";
+     .port = "80";
+}
+
+sub vcl_recv {
+if (req.url ~ "^/sports/") {
+        set req.backend_hint = web1;
+        }
+if (req.url ~ "^/news/") {
+        set req.backend_hint = web2;
+        }
+}
+
+
+
+扩展:上面是实现的url路径的负载分离，可以引出针对文件类型的分离(动静分离）
+
+只需要把
+
+sub vcl_recv {
+if (req.url ~ "\.(txt|html|css|jpg|jpeg|gif)$") {	--在这里写上你想让它访问web1的文件类型就可以
+        set req.backend_hint = web1 ;
+        } else {
+        set req.backend_hint = web2 ;
+        }
+}
+
+
+
+例4:把www.xxx.com/sports/下的请求，使用rr算法分别调度给web1和web2
+
+
+
+vcl 4.0;
+
+backend web1 {
+     .host = "192.168.1.128";
+     .port = "80";
+}
+
+backend web2 {
+     .host = "192.168.1.129";
+     .port = "80";
+}
+
+import directors;
+
+sub vcl_init {
+	new rr = directors.round_robin();
+	rr.add_backend(web1);
+	rr.add_backend(web2);
+}
+
+
+sub vcl_recv {
+if (req.url ~ "^/sports/") {
+        set req.backend_hint = rr.backend();
+        }
+if (req.url ~ "^/news/") {
+        set req.backend_hint = web2;
+        }
+}
+
+
+
+------------------------------------------------------------
+
+
+
+例5,后台web服务器的健康检查
+
+
+vcl 4.0;
+
+probe backend_healthcheck {
+	.url = "/test.txt";
+	.timeout = 0.3 s;
+	.window = 5;
+	.threshold = 3;
+	.initial = 3;
+}
+
+
+backend web1 {
+     .host = "192.168.1.128";
+     .port = "80";
+     .probe = backend_healthcheck;	
+}
+
+backend web2 {
+     .host = "192.168.1.129";
+     .port = "80";
+     .probe = backend_healthcheck;
+}
+
+import directors;
+
+sub vcl_init {
+	new rr = directors.round_robin();
+	rr.add_backend(web1);
+	rr.add_backend(web2);
+}
+
+sub vcl_recv {
+if (req.url ~ "^/sports/") {
+        set req.backend_hint = rr.backend();
+        }
+if (req.url ~ "^/news/") {
+        set req.backend_hint = web2;
+        }
+}
+
+
+
+－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－－
+
+综合配置实例:
+
+vcl 4.0;
+
+probe backend_healthcheck {
+	.url = "/test.txt";
+	.timeout = 0.3 s;
+	.window = 5;
+	.threshold = 3;
+	.initial = 3;
+}
+
+
+backend web1 {
+     .host = "192.168.1.128";
+     .port = "80";
+     .probe = backend_healthcheck;	
+}
+
+backend web2 {
+     .host = "192.168.1.129";
+     .port = "80";
+     .probe = backend_healthcheck;
+}
+
+import directors;
+
+sub vcl_init {
+	new rr = directors.round_robin();
+	rr.add_backend(web1);
+	rr.add_backend(web2);
+}
+
+acl purgers {
+	"127.0.0.1";
+	"192.168.1.0"/24;
+}
+
+sub vcl_recv {
+  if (req.method == "GET" && req.http.cookie) {
+    return(hash);
+}
+  if (req.url ~ "test.txt") {	
+    return(pass);
+  }
+  if (req.method == "PURGE") {
+    if (!client.ip ~ purgers) {
+      return(synth(405,"Method not allowed"));
+    }
+    return(hash);
+  }
+
+  if (req.http.X-Forward-For) {
+    set req.http.X-Forward-For = req.http.X-Forward-For + "," + client.ip;
+  } else {
+    set req.http.X-Forward-For = client.ip;
+  }
+
+
+if (req.http.host  ~ "www.cluster.com") {
+        set req.backend_hint = rr.backend() ;
+        } else {
+          return(synth(404,"error domain name"));
+        }
+}
+
+sub vcl_miss {
+    return(fetch);
+}
+
+
+sub vcl_hit {
+  if (req.method == "PURGE") {  
+    unset req.http.cookie;
+    return(synth(200,"Purged"));
+  }
+}
+
+
+sub vcl_backend_response {
+  if (bereq.url ~ "\.(jpg|jpeg|gif|png)$") {
+    set beresp.ttl = 10s;
+  }
+  if (bereq.url ~ "\.(html|css|js)$") {
+    set beresp.ttl = 20s;
+  }
+  if (beresp.http.Set-Cookie) {
+    return(deliver);
+  }
+}
+
+
+
+sub vcl_deliver {
+  if (obj.hits > 0) {
+    set resp.http.X-Cache = "@_@ HIT from " + server.ip;
+  } else {
+    set resp.http.X-Cache = "@_@ oh,god,MISS";
+  }
+}
+
+
+=====================================================================
+
+
+补充一：
+
+有一个问题：就是后台的web有大量的健康检查日志，如果配置的是每5秒一次检查的话，那么apache每5秒就会有这么一条；
+
+想要清除它的话
+
+# vim /etc/httpd/conf/httpd.conf
+SetEnvIf Request_URI "^/test\.txt$" dontlog	--加上这一句
+CustomLog logs/access_log combined env=!dontlog	--在你希望不记录与test.txt有关的日志后面加上env=!dontlog
+
+/etc/init.d/httpd restart
+
+
+那上面的方法与架构前端是varnish或squid或nginx或haproxy等无关，上面的配置是用的apache本身的参数
+
+
+当然如果你不会这种方法，也可以用笨方法，写一个脚本，定期或者在日志轮转前清除健康检查日志就可以了
+
+
+# vim clear_healtycheck_log.sh
+#!/bin/bash 
+sed -i '/test.txt/d' /var/log/httpd/access_log
+kill -USR1 `cat /var/run/httpd/httpd.pid`
+
+
+--------------------------------------------------------------
+
+补充二:
+
+关于如何让后台的web服务器显示的IP是客户端的真实IP，而不是varnish的内网IP的做法
+
+
+首先在vanrish配置里有下面一段相关配置（在4.0.3版测试时，不要这一段也可以，说明应该默认配置就是这个）
+
+  if (req.http.X-Forward-For) {
+    set req.http.X-Forward-For = req.http.X-Forward-For + "," + client.ip;
+  } else {
+    set req.http.X-Forward-For = client.ip;
+  }
+
+
+
+然后在后面的web服务器里做下面的修改
+# vim /etc/httpd/conf/httpd.conf 
+LogFormat "%{X-Forwarded-For}i %l %u %t \"%r\" %>s %b \"%{Referer}i\" \"%{User-Agent}i\"" varnishcombined   --加上这一句，这是表示增加了一个日志格式，这个格式名为varnishcombined
+
+
+CustomLog logs/access_log varnishcombined env=!dontlog  --修改这一句，把原来它使用的combined格式换成varnishcombined格式
+
+
+# /etc/init.d/httpd  restart
+
+然后使用客户端去访问测试，后面apache显示的IP是客户端的真实IP了
+但是这里有一个问题：如果这次访问是第一次访问，日志里才会有；如果是被varnish命中了，则varnish直接返回给客户端了，所以后台的web这里就没有记录了
+
+
+另一个解决方法：
+那就是不使用后面的web的日志，而直接使用varnish的日志
+/etc/init.d/varnishncsa start  --启动varnish日志服务
+
+# cat /var/log/varnish/varnishncsa.log   --日志路径
+
+
+＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝＝
+
+
+补充三：
+
+# varnishstat	--查看一些参数指标
+
+
+=============================================================
+
+
+
+补充四:
+尝试使用ab压力测试
+
+
+非varnish的环境,测试准备
+1，先关闭varnish，然后写一条DNAT
+iptables -t nat -A PREROUTING -i br0 -p tcp --dport 80 -j DNAT --to-destination 192.168.1.128
+2，关闭web2，只留下web1，单网站测试
+3，在web1上route add default gw 192.168.1.1把网关指向varnish内网IP，主要是为了数据能够回去
+
+然后在客户使用下面命令来测试
+# ab -c 100 -n 1000 http://www.cluster.com/1.txt
+
+
+Server Software:        Apache/2.2.15
+Server Hostname:        www.cluster.com
+Server Port:            80
+
+Document Path:          /1.txt
+Document Length:        4 bytes
+
+Concurrency Level:      100
+Time taken for tests:   0.343 seconds
+Complete requests:      1000
+Failed requests:        0
+Write errors:           0
+Total transferred:      271000 bytes
+HTML transferred:       4000 bytes
+Requests per second:    2913.94 [#/sec] (mean)
+Time per request:       34.318 [ms] (mean)
+Time per request:       0.343 [ms] (mean, across all concurrent requests)
+Transfer rate:          771.17 [Kbytes/sec] received
+
+
+
+
+有varnish环境测试准备
+1，去掉上面的iptables，
+2，启动varnish
+然后在客户端测试
+# ab -c 100 -n 1000 http://www.cluster.com/1.txt
+
+
+Server Software:        Apache/2.2.15
+Server Hostname:        www.cluster.com
+Server Port:            80
+
+Document Path:          /1.txt
+Document Length:        4 bytes
+
+Concurrency Level:      100
+Time taken for tests:   0.103 seconds
+Complete requests:      1000
+Failed requests:        0
+Write errors:           0
+Total transferred:      377951 bytes
+HTML transferred:       4056 bytes
+Requests per second:    9729.05 [#/sec] (mean)
+Time per request:       10.278 [ms] (mean)
+Time per request:       0.103 [ms] (mean, across all concurrent requests)
+Transfer rate:          3590.92 [Kbytes/sec] received
+
+
+最后比较结果，结论是varnish处理速度比非varnish环境快（还可以与squid做个对比，varnish比squid也要快)
+
+
+=====================================================================
+
+
+
+
+
+
+

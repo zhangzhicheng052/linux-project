@@ -1,0 +1,1254 @@
+web技术
+  CDN 
+   1 DNS_View
+   2 缓存Squid
+
+
+
+正向解析 域名解析IP；
+反向解析 IP解析域名；
+
+
+DNS查询顺序  
+    /etc/hosts ---> nameserver(首选|备用) ----> 根域. ---->  1级域名（顶级域|国家域）---> 2级域名（qq.com|uplooking.com) ---- 区域文件zone
+                                               A|PTR|NS|MX|CNAME...
+DNS原理
+     一次询问得到结果 第归查询  C/S
+     多次询问得到结果 迭代查询  S/S
+  一次第归 多次迭代
+
+----------------------------------------------------------------------------
+
+
+
+[root@foundation0 ~]# ssh root@servera1
+[root@servera ~]# setenforce 0
+[root@servera ~]# yum -y install bind chroot-bind
+ 
+---语法
+view “名称” {  # 名称可以自拟，但必须唯一
+	match-clients { ip/netmask; }; # 通过match-clients字段来区分不同区域
+	zone "domain" IN {  # 当有了view字段之后，所有的zone定义字段必须出现在view字段当中
+	type master;
+	file "domain.zone";
+	};
+};
+
+
+
+实验环境如下：
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+解析的主机名称：www.abc.com
+
+电信客户端ip：172.25.1.11   希望其解析到结果为192.168.11.1
+
+网通客户端ip：172.25.1.12   希望其解析到结果为22.21.1.1
+
+其余剩下其他运营商的客户端解析的结果皆为1.1.1.1 
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+
+[root@servera ~]# cat /etc/named.conf  |grep -v ^$
+options {
+	listen-on port 53 { 127.0.0.1; any; };
+	directory 	"/var/named";
+	dump-file 	"/var/named/data/cache_dump.db";
+	statistics-file "/var/named/data/named_stats.txt";
+	memstatistics-file "/var/named/data/named_mem_stats.txt";
+	allow-query     { localhost; any; };
+	recursion no;
+	dnssec-enable no;
+	dnssec-validation no;
+	dnssec-lookaside auto;
+	bindkeys-file "/etc/named.iscdlv.key";
+	managed-keys-directory "/var/named/dynamic";
+	pid-file "/run/named/named.pid";
+	session-keyfile "/run/named/session.key";
+};
+logging {
+        channel default_debug {
+                file "data/named.run";
+                severity dynamic;
+        };
+};
+view  dx {
+        match-clients { 172.25.1.11; };
+	zone "." IN {
+		type hint;
+		file "named.ca";
+	};
+	zone "abc.com" IN {
+		type master;
+		file "abc.com.dx.zone";	
+	};
+	include "/etc/named.rfc1912.zones";
+};
+view  wt {
+        match-clients { 172.25.1.12; };
+        zone "." IN {
+                type hint;
+                file "named.ca";
+        };
+        zone "abc.com" IN {
+                type master;
+                file "abc.com.wt.zone";
+        };
+	include "/etc/named.rfc1912.zones";
+};
+view  other {
+        match-clients { any; };
+        zone "." IN {
+                type hint;
+                file "named.ca";
+        };
+        zone "abc.com" IN {
+                type master;
+                file "abc.com.other.zone";
+        };
+        include "/etc/named.rfc1912.zones";
+};
+include "/etc/named.root.key";
+
+
+
+
+[root@servera named]# vim abc.com.dx.zone 
+$TTL 1D
+@	IN SOA	ns1.abc.com. rname.invalid. (
+					10	; serial
+					1D	; refresh
+					1H	; retry
+					1W	; expire
+					3H )	; minimum
+@	NS	ns1.abc.com.
+ns1     A       172.25.1.10
+www	A	192.168.11.1
+
+
+[root@servera named]# cp abc.com.dx.zone abc.com.wt.zone 
+
+[root@servera named]# vim abc.com.wt.zone 
+
+$TTL 1D
+@       IN SOA  ns1.abc.com. rname.invalid. (
+                                        10      ; serial
+                                        1D      ; refresh
+                                        1H      ; retry
+                                        1W      ; expire
+                                        3H )    ; minimum
+@       NS      ns1.abc.com.
+ns1     A       172.25.1.10
+www     A       22.21.1.1
+
+
+[root@servera named]# cp abc.com.wt.zone abc.com.other.zone
+
+[root@servera named]# vim abc.com.other.zone 
+$TTL 1D
+@       IN SOA  ns1.abc.com. rname.invalid. (
+                                        10      ; serial
+                                        1D      ; refresh
+                                        1H      ; retry
+                                        1W      ; expire
+                                        3H )    ; minimum
+@       NS      ns1.abc.com.
+ns1     A       172.25.1.10
+www     A       1.1.1.1
+
+
+[root@servera named]# chgrp named abc.com.*
+检测语法:
+[root@servera named]# named-checkconf
+[root@servera named]# named-checkzone  abc.com /var/named/abc.com.dx.zone 
+zone abc.com/IN: loaded serial 10
+OK
+[root@servera named]# named-checkzone  abc.com /var/named/abc.com.wt.zone 
+zone abc.com/IN: loaded serial 10
+OK
+[root@servera named]# named-checkzone  abc.com /var/named/abc.com.other.zone 
+zone abc.com/IN: loaded serial 10
+OK
+[root@servera named]# service named start
+[root@servera named]# chkconfig named on
+
+
+
+-------测试-------------
+
+serverb1 172.25.1.11  -----查询结果（模拟电信链路）
+[root@foundation0 ~]# ssh root@serverb1
+[root@serverb ~]# ifconfig eth0 |grep 172
+        inet 172.25.1.11  netmask 255.255.255.0  broadcast 172.25.1.255
+
+
+[root@serverb ~]# nslookup 
+> server 172.25.1.10
+Default server: 172.25.1.10
+Address: 172.25.1.10#53
+> www.abc.com
+Server:		172.25.1.10
+Address:	172.25.1.10#53
+
+Name:	www.abc.com
+Address: 192.168.11.1
+
+
+
+serverc1 172.25.1.12  -----查询结果（模拟网通链路）
+[root@foundation0 ~]# ssh root@serverc1
+
+[root@serverc ~]# nslookup 
+> server 172.25.1.10
+Default server: 172.25.1.10
+Address: 172.25.1.10#53
+> www.abc.com
+Server:		172.25.1.10
+Address:	172.25.1.10#53
+
+Name:	www.abc.com
+Address: 22.21.1.1
+
+
+---------f1物理机-----------------
+
+[root@foundation1 ~]# nslookup 
+> server 172.25.1.10
+Default server: 172.25.1.10
+Address: 172.25.1.10#53
+> www.abc.com
+Server:		172.25.1.10
+Address:	172.25.1.10#53
+
+Name:	www.abc.com
+Address: 1.1.1.1
+
+
+
+---------------------------------------------
+如何设定acl列表
+
+acl "foosubnet" { 192.168.1/24;192.168.2/24; };
+
+
+方式二:
+
+[root@servera named]# vim /etc/named.conf 
+
+
+include "/etc/dx.cfg";
+include "/etc/wt.cfg";
+
+
+view  dx {
+        match-clients { dx; };
+        zone "." IN {
+                type hint;
+                file "named.ca";
+        };
+
+        zone "abc.com" IN {
+                type master;
+                file "abc.com.dx.zone";
+        };
+        include "/etc/named.rfc1912.zones";
+};
+
+view  wt {
+        match-clients { wt; };
+        zone "." IN {
+                type hint;
+                file "named.ca";
+        };
+
+        zone "abc.com" IN {
+                type master;
+                file "abc.com.wt.zone";
+        };
+        include "/etc/named.rfc1912.zones";
+};
+
+
+view  other {
+        match-clients { any; };
+        zone "." IN {
+                type hint;
+                file "named.ca";
+        };
+
+        zone "abc.com" IN {
+                type master;
+                file "abc.com.other.zone";
+        };
+        include "/etc/named.rfc1912.zones";
+};
+
+
+
+[root@servera named]# cat /etc/wt.cfg 
+acl "wt" {
+        172.25.1.13;
+        172.25.1.14;
+};
+
+
+[root@servera named]# cat /etc/dx.cfg 
+acl "dx" {
+        172.25.1.11;
+        172.25.1.12;
+};
+
+[root@servera named]# named-checkconf 
+[root@servera named]# service named restart
+
+
+测试:
+ 172.25.1.11与172.25.1.12 电信组用户
+
+[root@serverc ~]# nslookup 
+> server 172.25.1.10
+
+> www.abc.com
+Server:		172.25.1.10
+Address:	172.25.1.10#53
+
+Name:	www.abc.com
+Address: 192.168.11.1
+
+[root@serverc ~]# nslookup 
+> server 172.25.1.10
+
+> www.abc.com
+Server:		172.25.1.10
+Address:	172.25.1.10#53
+
+Name:	www.abc.com
+Address: 192.168.11.1
+
+
+
+ 172.25.1.13与172.25.1.14 网通组用户
+
+
+[root@serverd ~]# nslookup 
+> server 172.25.1.10
+Default server: 172.25.1.10
+Address: 172.25.1.10#53
+> www.abc.com
+Server:		172.25.1.10
+Address:	172.25.1.10#53
+
+Name:	www.abc.com
+Address: 22.21.1.1
+
+------扩展--------------
+
+ 运行脚本获取中国地区的公网地址
+ 记录在zh_ipinfo.txt
+ 
+截取中国电信的公网地址
+[root@servera ~]# awk -F"," 'BEGIN {print "acl zhdx {" };  $0 ~ /CHINANET/ {print $1"/"$2";"} ; END { print "};" }' zh_ipinfo.txt  > /etc/zhdx.cfg.back
+
+
+[root@servera ~]# sed '/^\/.*\|[A-Z]/d' /etc/zhdx.cfg.back > /etc/zhdx.cfg
+
+
+
+截取中国联通的公网地址
+[root@servera ~]# awk -F"," 'BEGIN {print "acl zhlt {" };  $0 !~ /CHINANET/ {print $1"/"$2";"} ; END { print "};" }' zh_ipinfo.txt  > /etc/zhlt.cfg.back
+
+[root@servera ~]# sed '/^\/.*\|[A-Z]\|^[a-z].*;/d' /etc/zhlt.cfg.back > /etc/zhlt.cfg
+
+
+include "/etc/zhdx.cfg";
+include "/etc/zhlt.cfg";
+
+        match-clients { dx; zhdx; };
+        match-clients { wt; zhlt; };
+
+
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+
+## 5.基于dns-view的主辅同步##
+
+由于一个IP地址只能读取一个view字段的配置，那想要同步多个view字段的内容就需要有不同的ip地址。
+
+实验环境里，我们以serverj作为我们的dns从服务器，servera作为我们的dns主服务器
+
+ip地址对应关系如下：
+
+| servera           | serverj           |
+| ----------------- | ----------------- |
+| eth0:172.25.1.10  | eth0:172.25.1.19  |
+| eth1:192.168.1.10 | eth1:192.168.1.19 |
+| eth2:192.168.1.10 | eth2:192.168.1.19 |
+[root@servera ~]# vim /etc/named.conf 
+include "/etc/dx.cfg";
+include "/etc/wt.cfg";
+include "/etc/zhdx.cfg";
+include "/etc/zhlt.cfg";
+view  dx {
+        match-clients { dx; zhdx; 172.25.1.19; !192.168.0.19; !192.168.1.19; };
+	zone "." IN {
+		type hint;
+		file "named.ca";
+	};
+	zone "abc.com" IN {
+		type master;
+		file "abc.com.dx.zone";	
+	};
+	include "/etc/named.rfc1912.zones";
+};
+
+
+
+view  wt {
+        match-clients { wt; zhlt; !172.25.1.19; 192.168.0.19; !192.168.1.19; };
+        zone "." IN {
+                type hint;
+                file "named.ca";
+        };
+        zone "abc.com" IN {
+                type master;
+                file "abc.com.wt.zone";
+        };
+	include "/etc/named.rfc1912.zones";
+};
+
+view  other {
+        match-clients { any; !172.25.1.19; !192.168.0.19; 192.168.1.19; };
+        zone "." IN {
+                type hint;
+                file "named.ca";
+        };
+
+        zone "abc.com" IN {
+                type master;
+                file "abc.com.other.zone";
+        };
+        include "/etc/named.rfc1912.zones";
+};
+
+include "/etc/named.root.key";
+
+[root@servera ~]# named-checkconf 
+[root@servera ~]# service named restart
+
+
+-------------------------------------
+启动DNS slave从节点 serverj
+[root@foundation0 ~]# rht-vmctl start serverj
+[root@servera ~]# ssh root@serverj1
+[root@serverj ~]# setenforce 0
+[root@serverj ~]# yum -y install bind
+
+
+将配置文件从servera迁移至serverj：
+
+[root@servera ~]# tar czvf /tmp/dns_config.tar.gz /etc/dx.cfg /etc/wt.cfg /etc/zhdx.cfg /etc/zhlt.cfg  /etc/named.conf 
+
+[root@servera ~]# scp /tmp/dns_config.tar.gz serverj1:/root/
+
+
+[root@serverj ~]# tar xf dns_config.tar.gz -C /
+
+
+
+
+[root@serverj ~]# cat /etc/named.conf  |grep -v ^$
+include "/etc/dx.cfg";
+include "/etc/wt.cfg";
+include "/etc/zhdx.cfg";
+include "/etc/zhlt.cfg";
+options {
+	listen-on port 53 { 127.0.0.1; any; };
+	directory 	"/var/named";
+	dump-file 	"/var/named/data/cache_dump.db";
+	statistics-file "/var/named/data/named_stats.txt";
+	memstatistics-file "/var/named/data/named_mem_stats.txt";
+	allow-query     { localhost; any; };
+	recursion no;
+	dnssec-enable no;
+	dnssec-validation no;
+	dnssec-lookaside auto;
+	bindkeys-file "/etc/named.iscdlv.key";
+	managed-keys-directory "/var/named/dynamic";
+	pid-file "/run/named/named.pid";
+	session-keyfile "/run/named/session.key";
+};
+logging {
+        channel default_debug {
+                file "data/named.run";
+                severity dynamic;
+        };
+};
+view  dx {
+        match-clients { dx; zhdx; 172.25.1.19; !192.168.0.19; !192.168.1.19; };
+	transfer-source 172.25.1.19;
+	zone "." IN {
+		type hint;
+		file "named.ca";
+	};
+	zone "abc.com" IN {
+		type slave;
+		masters { 172.25.1.10; };
+		file "slaves/abc.com.dx.zone";	
+	};
+	include "/etc/named.rfc1912.zones";
+};
+view  wt {
+        match-clients { wt; zhlt; !172.25.1.19; 192.168.0.19; !192.168.1.19; };
+        transfer-source 192.168.0.19;
+        zone "." IN {
+                type hint;
+                file "named.ca";
+        };
+        zone "abc.com" IN {
+                type slave;
+                masters { 192.168.0.10; };
+                file "slaves/abc.com.wt.zone";
+        };
+	include "/etc/named.rfc1912.zones";
+};
+view  other {
+        match-clients { any; !172.25.1.19; !192.168.0.19; 192.168.1.19; };
+        transfer-source 192.168.1.19;
+        zone "." IN {
+                type hint;
+                file "named.ca";
+        };
+        zone "abc.com" IN {
+                type slave;
+                masters { 192.168.1.10; };
+                file "slaves/abc.com.other.zone";
+        };
+        include "/etc/named.rfc1912.zones";
+};
+include "/etc/named.root.key";
+
+[root@serverj ~]# service named start
+Redirecting to /bin/systemctl start  named.service
+[root@serverj ~]# chkconfig named on
+
+
+[root@serverj ~]# ls /var/named/slaves/ -l
+total 12
+-rw-r--r--. 1 named named 225 Sep 22 03:42 abc.com.dx.zone
+-rw-r--r--. 1 named named 225 Sep 22 03:42 abc.com.other.zone
+-rw-r--r--. 1 named named 225 Sep 22 03:42 abc.com.wt.zone
+
+
+--------------------------------------------------------
+
+测试：
+
+
+
+[root@serverb ~]# nslookup 
+> server 172.25.1.10
+Default server: 172.25.1.10
+Address: 172.25.1.10#53
+> www.abc.com
+Server:		172.25.1.10
+Address:	172.25.1.10#53
+
+Name:	www.abc.com
+Address: 192.168.11.1
+> 
+> server 172.25.1.19
+Default server: 172.25.1.19
+Address: 172.25.1.19#53
+> www.abc.com
+Server:		172.25.1.19
+Address:	172.25.1.19#53
+
+Name:	www.abc.com
+Address: 192.168.11.1
+
+
+
+
+[root@serverb ~]# vim /etc/resolv.conf
+nameserver 172.25.1.10
+nameserver 172.25.1.19
+
+[root@serverb ~]# nslookup www.abc.com
+Server:		172.25.1.10
+Address:	172.25.1.10#53
+
+Name:	www.abc.com
+Address: 192.168.11.1
+
+[root@serverb ~]# nslookup www.abc.com
+Server:		172.25.1.19
+Address:	172.25.1.19#53
+
+Name:	www.abc.com
+Address: 192.168.11.1
+
+
+
+
+
+通步zone文件的A记录
+[root@servera ~]# vim /var/named/abc.com.dx.zone 
+
+                                        20      ; serial
+
+v       A       1.2.3.4
+
+[root@servera ~]# service named restart
+
+
+默认1天时间同步:
+
+手动触发: 删除从节点的zone文件
+[root@serverj ~]# rm -fr /var/named/slaves/abc.com.dx.zone 
+[root@serverj ~]# service named restart
+
+-----------------------------------------
+ RHEL6 后安装bind-chroot
+ RHEL7 先安装bind 与 bind-chroot
+-----------------------------------------
+
+ 安全加固 chroot  
+[root@servera named]# yum -y install bind-chroot
+
+[root@servera named]# ls /var/named/chroot/
+dev  etc  run  usr  var
+
+
+[root@node01 ~]# ps aux |grep named
+named     1433  0.3  1.7 161584 13568 ?        Ssl  16:18   0:00 /usr/sbin/named -u named -t /var/named/chroot
+
+
+===================================================================
+
+sync  同步
+async 异步
+rsync 远程同步
+
+
+rsync作用:
+	1、同步文件（只同步有差异的文件列表）
+	2、异地备份
+	3、触发型的更新：sersync+rsync
+
+
+
+用于 rsync 在远程多台主机间作文件同步 （走的是ssh通道，或者走自己的daemon通道）
+
+	server1<---------->server2
+		从server1同步一个文件列表（10个文件）至server2
+
+rsync同步文件的原理：
+1、在server1上扫描10个文件，并且得到一个md5/sha1检验值列表
+2、在远程机器server2上,也扫描对应列表，到这步我们就有了两个列表（检验）
+3、作为同步的客户去对比这两个列表，如果有差异的文件是需要同步，如果无差异表示源目录的文件是一致，所以不需要同步
+
+
+
+ssh:
+ 	192.168.0.15<-->192.168.0.254(SSHD)
+			rsync [OPTION]... SRC [SRC]... [USER@]HOST:DEST
+  # rsync -avz sshuser@www1.uplooking.com:/var/www/html/ /tmp/
+
+daemon			
+ 	192.168.0.15<-->192.168.0.254(rsyncd)
+			rsync [OPTION]... SRC [SRC]... rsync://[USER@]HOST[:PORT]/DEST
+				# rsync -avz backuper@192.168.0.11::webroot /tmp/  两个冒号
+				# rsync -avz rsync://backuper@192.168.0.11/webroot /tmp/
+	
+rsync是一个客户端/服务器同体一个软件：
+	# rsync --help				--客户端模式
+	# rsync --daemon --help		--服务器模式
+         
+主配置文件 rsyncd.conf			
+
+			
+			
+以下列出rsync作为客户端时几个较常用的命令选项及其含义：
+ -a 使用归档（archive）模式，保留文件原有的权限、属性、属主等信息，等同于使用“-rlptgoD”等多个选项的组合
+ -l 符号(软)连接文件仍然复制为符号连接
+ -H 保留硬连接文件
+ -r 递归模式，包含目录及子目录中所有文件
+ -v 显示同步过程的详细（verbose）信息
+ -z 在传输文件时进行压缩（gzip compress）
+ -o 保留文件的属主标记（仅超级用户使用）
+ -g 保留文件的属组标记（仅超级用户使用）
+ -t 保留文件的时间标记
+ -p 保留文件的权限标记
+ -D 保留设备文件及其他特殊文件
+ -R 保留原来绝对路径
+ --delete 
+		1)--delete在rsync daemon是一定能够成功的，而SSH通道不一定成功
+		2)作用：删除发送端没有而源端有的，保证接收端跟发送端文件是一致的
+ --checksum 根据校验和来决定是否跳过文件（而不是根据文件大小、修改时间）
+
+
+普通应用：
+rsync -av  /home/    /backup/     --本机上的同步，把/home目录下的内容同步到/backup目录下(包括隐藏文件)
+rsync -av  --delete  /home/    /backup/ --保证内容一致
+rsync -av  /home/    192.168.0.2:/backup/  --异地备份
+rsync -avz 192.168.0.2:/backup /opt/  ---压缩的方式
+rsync -avzR 192.168.0.2:/backup/  /   ---保持备份绝对路径
+
+使用ssh通道传输（自定义ssh的端口）
+rsync  -a /backup/  '-e ssh -p 2222' 192.168.0.2:/test1/ 
+
+
+
+区别
+rsync -av  /home    /backup/    --只拷贝目录的内容
+rsync -aRv  /home/    /backup/  --将整个目录拷贝到指定目录下
+
+
+如果源目录有文件被删除了，那同步的目录是删除还是不删除，是否可以用参数来控制?
+--delete
+# rsync -av --delete  /home    /backup/ 
+sending incremental file list
+deleting home/2ping-3.2.1-2.el6.noarch.rpm
+
+# rsync  -aHAX --delete /test/ /test1/    ---比较完整的一个写法
+-H 硬链接
+-A acl属性
+-X attrs属性 
+
+
+
++++++++++++++++++rsync daemon方式++++++++++++++++++++++++++++
+方式1  xinetd 统一管理rsync服务
+方式2  rsyncd 独立进程
+  主配置文件 /etc/rsyncd.conf  # man 5 rsyncd.conf
+
+
+
+
+方式1 
+   编译xinetd配置文件 /etc/xinetd.conf /etc/xinetd.d/rsync
+[root@node1 ~]# yum -y install xinetd rsync
+
+
+[root@node1 ~]# chkconfig rsync on
+[root@node1 ~]# vim /etc/xinetd.d/rsync 
+# default: off
+# description: The rsync server is a good addition to an ftp server, as it \
+#       allows crc checksumming etc.
+service rsync
+{
+        disable = no
+        flags           = IPv6
+        socket_type     = stream
+        wait            = no
+        user            = root
+        server          = /usr/bin/rsync
+        server_args     = --daemon
+        log_on_failure  += USERID
+	access_times	= 9:30-12:00 14:00-16:00
+	no_access	= 172.25.1.11
+
+}
+
+  生成主配置文件
+[root@node1 ~]# vim /etc/rsyncd.conf
+motd file=/etc/rsyncd.welcome  --欢迎信息
+
+[notes]  --共享名称
+path=/backup  ---真实共享目录
+
+[root@node1 ~]# echo "welcome to node1 rsync server" >  /etc/rsyncd.welcome
+
+ 启动服务
+[root@node1 ~]# service xinetd start
+[root@node1 ~]# chkconfig xinetd on
+[root@node1 ~]# netstat -tnlp |grep :873
+tcp        0      0 :::873                      :::*                        LISTEN      5657/xinetd         
+
+客户端的操作：
+
+[root@node2 ~]# rsync -v 192.168.0.1::  ---查看服务端共享资源
+welcome to node1 rsync server
+
+notes  ---共享名称
+
+
+
+
+[root@node2 ~]# rsync -av 192.168.0.1::notes /opt/
+[root@node2 ~]# rsync -av --delete 192.168.0.1::notes /opt/  ---一定成功
+
+
+
+方式2 独立进程 （帐号与密码访问）
+ [root@node1 ~]# service xinetd stop
+ # rm -fr /etc/xinetd.d/rsync 
+
+
+1> 设置主配置文件
+
+[root@node1 ~]# mkdir /webserver
+[root@node1 ~]# chown nobody.nobody /webserver/
+[root@node1 ~]# chmod 770 /webserver/
+
+[root@node1 ~]# vim /etc/rsyncd.conf 
+uid=nobody
+gid=nobody
+use chroot=yes
+address=192.168.0.1
+port 873
+log file=/var/log/rsyncd.log
+pid file=/var/run/rsyncd.pid
+hosts allow=192.168.0.0/24
+motd file=/etc/rsyncd.welcome
+
+[webdata]
+path=/webserver
+comment= web root share with rsync
+read only=no
+dont compress=*.gz *.bz2 *.tgz *.rar *.zip *.rpm
+auth users=user01 user02
+secrets file=/etc/rsyncd_user.db
+
+
+2> 设置密码
+[root@node1 ~]# vim /etc/rsyncd_user.db
+user01:123
+user02:456
+[root@node1 ~]# chmod 600 /etc/rsyncd_user.db 
+
+
+3> 启动
+	# rsync --daemon
+	# vim /etc/rc.local
+	/usr/bin/rsync --daemon
+[root@node1 ~]# netstat -tnlp |grep :873
+tcp        0      0 192.168.0.1:873             0.0.0.0:*                   LISTEN      5818/rsync 
+
+
+
+
+----测试
+[root@node2 ~]# rsync -v 192.168.0.1::
+welcome to node1 rsync server
+
+webdata        	web root share with rsync
+
+[root@node2 ~]# rsync -av user01@192.168.0.1::webdata /webserver
+Password: 
+
+
+免密码
+[root@node2 ~]# echo 456 > /root/.rsyncd_passwd 
+[root@node2 ~]# chmod 600 /root/.rsyncd_passwd 
+[root@node2 ~]# rsync -av --password-file=/root/.rsyncd_passwd rsync://user02@192.168.0.1/webdata /var/tmp/
+
+
+
+
+自动每隔2秒同步一次
+[root@node2 ~]# while :; do sleep 2s; rsync -a --delete --password-file=/root/.rsync_pw user02@192.168.0.1::webdata  /webserver &> /dev/null; done
+
+ 疑问 如果原始数据服务器目录发生改变，其它的节点 与其同步?
+
+制定一个计划任务 每隔1分钟 执行同步
+[root@node2 ~]# crontab -eu root
+* * * * * rsync -a --delete --password-file=/root/.rsyncd_passwd rsync://user02@192.168.0.1/webdata /webserver/
+
+
+
+
+练习：
+要求：
+1。把日志记录到/var/log/rsyncd.log	
+2。共享模块要求隐藏（也就是说客户端查看不到这个模块名)  
+3。并且同时只能1个客户端连接进行同步这个module
+4。只能允许192.168.0.x(ip你自定义)同步这个module
+5。只能早上9点到下午6点同步
+
+
+
+
+==================================================================================
+expect 自动应答		TCL(Tool Command Language)语言
+
+
+yum install expect -y
+
+
+Summary     : A program-script interaction and testing utility
+Description :
+Expect is a tcl application for automating and testing
+interactive applications such as telnet, ftp, passwd, fsck,
+rlogin, tip, etc. Expect makes it easy for a script to
+control another program and interact with it.
+
+This package contains expect and some scripts that use it.
+
+
+任何有交互性的操作，都可以用expect来做
+
+
+例1，使用expect修改用户密码
+#!/bin/bash
+
+expect <<EOF > /dev/null 2>&1
+spawn passwd $1		--产生passwd $1这个命令
+expect "rd:"		--当停在rd:结尾这个标识符时
+send "456\r"		--我就把456传给它
+expect "rd:"		--当再次停在rd:结尾这个标识符时
+send "456\r"		--我就再次把456传给它
+expect eof		--表示expect结束
+EOF
+
+# sh 1.expect test    --执行方法，因为脚本里写的是$1，所以后面接你要修改密码的用户名
+
+
+例2，使用expect下载同步ftp共享的文件 
+# cat 2.expect 
+#!/bin/bash
+
+expect <<EOF &> /dev/null
+spawn lftp 10.1.1.10 -u notes
+expect "Password:"
+send "123\n"
+expect "10.1.1.10:~>"
+send "mirror mysql/ /notes/\n"
+send "mirror program/ /notes/\n"
+send "quit\n"
+expect eof
+EOF
+
+# sh 2.expect 
+
+
+例3，使用expect实现ssh传密码
+
+#!/bin/bash
+
+sed -i '/^'$1'/d' /root/.ssh/known_hosts
+expect << EOF > /dev/null 2>&1
+spawn ssh $1
+expect "no)?"
+send "yes\r"
+expect "password:"
+send "123456\r"
+expect "# "
+send "touch /root/Desktop/123\n"
+send "exit\n"
+expect eof
+EOF
+
+
+------------------
+#!/bin/bash
+
+
+LANG=c
+sed -i '/^'$1'/d' /root/.ssh/known_hosts
+expect <<EOF  > /dev/null 2>&1
+spawn ssh $1
+expect "(yes/no)?"
+send "yes\r"
+expect "rd:"
+send "redhat\r"
+expect "# "
+send "rm -fr /tmp/*\r"
+send "touch /tmp/file01\r"
+send "touch /var/tmp/abc\r"
+send "exit 1\r"
+EOF
+-------------------
+
+
+--关于上面跳过yes的问题，可以加下面的参数来做
+ssh 192.168.0.1 -o StrictHostKeyChecking=no
+
+
+[root@i ~]# vim $HOME/.ssh/config 
+Host 192.168.0.*
+StrictHostKeyChecking no
+
+
+================================================================ 
+
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+使用sersync整合rsync,实现WEB页面同步更新,亦可做数据备份之用.
+   		        --> n1[webdate]	172.25.1.10
+		       /	
+	sersync+rsync-----> n2[webdate]	172.25.1.11
+        (13)          \
+		        --> n3[webdata]	172.25.1.12
+原理:
+通过Linux内核的inotify 机制，根据源目录的变化情况，安排触发更新式的rsync同步任务
+以上拓补图中sersync就是源目录服务器,所有对网页修改的更新只需要在源目录服务器上做修改即可更新至三对WEB_SERVE上
+
+
+Rsync+Inotify-tools与Rsync+sersync这两种架构有什么区别？
+
+1、Rsync+Inotify-tools
+（1）：Inotify-tools只能记录下被监听的目录发生了变化（包括增加、删除、修改），并没有把具体是哪个文件或者哪个目录发生了变化记录下来；
+（2）：rsync在同步的时候，并不知道具体是哪个文件或者哪个目录发生了变化，每次都是对整个目录进行同步，当数据量很大时，整个目录同步非常耗时（rsync要对整个目录遍历查找对比文件），因此，效率很低。
+
+2、Rsync+sersync
+（1）：sersync可以记录下被监听目录中发生变化的（包括增加、删除、修改）具体某一个文件或某一个目录的名字；
+（2）：rsync在同步的时候，只同步发生变化的这个文件或者这个目录（每次发生变化的数据相对整个同步目录数据来说是很小的，rsync在遍历查找比对文件时，速度很快），因此，效率很高。
+
+小结：当同步的目录数据量不大时，建议使用Rsync+Inotify-tools；当数据量很大（几百G甚至1T以上）、文件很多时，建议使用Rsync+sersync。
+
+-------------------------------------
+
+
+
+
+
+
+-------------------------------------
+servsync+rsync: 172.25.1.13
+rsyncd-n1:	172.25.1.10
+rsyncd-n2:	172.25.1.11
+
+
+
+ 根据之前的环境 关闭node1节点的rsyncd服务
+[root@node1 ~]# pkill -9 rsync
+[root@node1 ~]# rm -fr /var/run/rsyncd.pid 
+
+
+
+
+1) 配置web组中的成员 rsyncd-n1 (rsync独立服务)
+[root@node2 ~]# chown nobody.nobody /webserver/
+[root@node2 ~]# chmod 775 /webserver/
+# vim /etc/rsyncd.conf
+
+
+uid=nobody
+gid=nobody
+use chroot=yes
+port 873
+log file=/var/log/rsyncd.log
+pid file=/var/run/rsyncd.pid
+hosts allow=192.168.0.0/24
+motd file=/etc/rsyncd.welcome
+
+[webdata]
+path=/webserver
+comment= web root share with rsync
+read only=no
+dont compress=*.gz *.bz2 *.tgz *.rar *.zip *.rpm
+auth users=user01 user02
+secrets file=/etc/rsyncd_user.db
+
+[root@node2 ~]# vim /etc/rsyncd_user.db 
+user01:123
+user02:456
+[root@node2 ~]# chmod 600 /etc/rsyncd_user.db 
+
+
+
+[root@node2 ~]# vim /etc/rc.local 
+/usr/bin/rsync --daemon
+
+
+启动服务
+[root@node2 ~]# source  /etc/rc.local 
+
+
+
+同步rsync相关文件 给其它节点rsync-n2
+[root@node2 ~]# rsync -avzR /etc/rsyncd.conf /etc/rsyncd_user.db
+/etc/rc.d/rc.local /webserver/ 192.168.0.3:/
+
+[root@node3 ~]# source  /etc/rc.local 
+[root@node3 ~]# netstat -tnlp |grep :873
+
+
+
+
+配置servsync  192.168.0.1
+
+ 1) 下载软件包
+[root@node1 ~]# lftp 192.168.0.254
+lftp 192.168.0.254:~> cd notes/project/software/
+lftp 192.168.0.254:/notes/project/software> mirror sersync/
+lftp 192.168.0.254:/notes/project/software> exit
+
+ 2） 安装
+[root@node1 ~]# tar xf sersync/sersync2.5.4_64bit_binary_stable_final.tar.gz
+-C /opt/
+[root@node1 ~]# mv /opt/GNU-Linux-x86/ /opt/servsync
+[root@node1 ~]# find /opt/servsync/
+/opt/servsync/
+/opt/servsync/sersync2  ---二进制命令
+/opt/servsync/confxml.xml  --配置文件
+
+ 3）测试 能否与rsyncd同步数据
+[root@node1 ~]# mkdir /webserver/ -p
+[root@node1 ~]# chown nobody. /webserver/
+[root@node1 ~]# chmod 775 /webserver/
+[root@node1 ~]# cp /etc/passwd /webserver/
+
+[root@node1 ~]# rsync -av --delete /webserver/  user01@192.168.0.2::webdata 
+[root@node1 ~]# rsync -av --delete /webserver/
+rsync://user02@192.168.0.3/webdata 
+
+
+ 4） 定义sersync配置文件
+
+[root@node1 ~]# vim /opt/servsync/confxml.xml 
+<?xml version="1.0" encoding="ISO-8859-1"?>
+<head version="2.5">
+    <host hostip="localhost" port="8008"></host>
+    <debug start="false"/>
+    <fileSystem xfs="false"/>
+    <filter start="ture">
+	<exclude expression="(.*)\.svn"></exclude>
+	<exclude expression="(.*)\.gz"></exclude>
+	<exclude expression="^info/*"></exclude>
+	<exclude expression="^static/*"></exclude>
+	<exclude expression="(.*)\.mp3"></exclude>
+    </filter>
+    <inotify>
+	<delete start="true"/>
+	<createFolder start="true"/>
+	<createFile start="true"/>
+	<closeWrite start="true"/>
+	<moveFrom start="true"/>
+	<moveTo start="true"/>
+	<attrib start="false"/>
+	<modify start="true"/>
+    </inotify>
+
+    <sersync>
+	<localpath watch="/webserver">
+	    <remote ip="192.168.0.2" name="webdata"/>
+	    <remote ip="192.168.0.3" name="webdata"/>
+	</localpath>
+	<rsync>
+	    <commonParams params="-az"/>
+	    <auth start="true" users="user01" passwordfile="/etc/rsync.pas"/>
+	    <userDefinedPort start="false" port="874"/><!-- port=874 -->
+	    <timeout start="false" time="100"/><!-- timeout=100 -->
+	    <ssh start="false"/>
+	</rsync>
+	<failLog path="/tmp/rsync_fail_log.sh" timeToExecute="60"/><!--default
+every 60mins execute once-->
+	<crontab start="false" schedule="600"><!--600mins-->
+	    <crontabfilter start="false">
+		<exclude expression="*.php"></exclude>
+		<exclude expression="info/*"></exclude>
+	    </crontabfilter>
+	</crontab>
+	<plugin start="false" name="command"/>
+    </sersync>
+
+    <plugin name="command">
+	<param prefix="/bin/sh" suffix="" ignoreError="true"/>	<!--prefix
+/opt/tongbu/mmm.sh suffix-->
+	<filter start="false">
+	    <include expression="(.*)\.php"/>
+	    <include expression="(.*)\.sh"/>
+	</filter>
+    </plugin>
+
+    <plugin name="socket">
+	<localpath watch="/opt/tongbu">
+	    <deshost ip="192.168.138.20" port="8009"/>
+	</localpath>
+    </plugin>
+    <plugin name="refreshCDN">
+	<localpath watch="/data0/htdocs/cms.xoyo.com/site/">
+	    <cdninfo domainname="ccms.chinacache.com" port="80"
+username="xxxx" passwd="xxxx"/>
+	    <sendurl base="http://pic.xoyo.com/cms"/>
+	    <regexurl regex="false"
+match="cms.xoyo.com/site([/a-zA-Z0-9]*).xoyo.com/images"/>
+	</localpath>
+    </plugin>
+</head>
+
+设置rsync daemon通道
+
+[root@node1 webserver]# echo 123 > /etc/rsync.pas
+[root@node1 webserver]# chmod 600 /etc/rsync.pas 
+
+
+  5) 启动
+[root@node1 ~]# /opt/servsync/sersync2 -h
+[root@node1 ~]# /opt/servsync/sersync2 -d -r -n 12 -o
+/opt/servsync/confxml.xml 
+
+
+
+  6) 测试
+[root@node1 webserver]# cd /webserver/
+[root@node1 webserver]# touch file{1..20}
+ 其它节点是否同步
+
+----------------ssh通道---------------------------------------------------------
+
+
+1 新建一个用户用户同步文件 rsyncuser
+[root@node2 ~]# useradd rsyncuser 
+[root@node2 ~]# echo '147258' | passwd --stdin rsyncuser
+
+
+[root@node2 ~]# useradd rsyncuser
+[root@node3 ~]# echo '147258' | passwd --stdin rsyncuser
+
+2 改变目录的权限与属性
+[root@node2 ~]# chown rsyncuser. /webserver/
+[root@node2 ~]# chmod 775 /webserver/
+
+
+[root@node3 ~]# chown rsyncuser. /webserver/
+[root@node3 ~]# chmod 775 /webserver/
+
+
+3 在servsync 生成密钥对 对送公钥给其它节点 rsyncuser用户
+[root@node1 ~]# ssh-keygen -t rsa
+[root@node1 ~]# ssh-copy-id -i rsyncuser@192.168.0.2
+[root@node1 ~]# ssh-copy-id -i rsyncuser@192.168.0.3
+
+
+
+
+4 更改配置文件
+[root@node1 ~]# pkill -9 sersync
+[root@node1 ~]# cp /opt/servsync/confxml.xml /opt/servsync/confxml_ssh.xml
+
+[root@node1 ~]# vim /opt/servsync/confxml_ssh.xml 
+    <sersync>
+        <localpath watch="/webserver">
+            <remote ip="192.168.0.2" name="/webserver"/>
+            <remote ip="192.168.0.3" name="/webserver"/>
+        </localpath>
+        <rsync>
+            <commonParams params="-az"/>
+            <auth start="true" users="rsyncuser" passwordfile=" "/>
+            <userDefinedPort start="false" port="874"/><!-- port=874 -->
+            <timeout start="false" time="100"/><!-- timeout=100 -->
+            <ssh start="true"/>
+        </rsync>
+    </sersync>
+
+
+[root@node1 ~]# /opt/servsync/sersync2 -d -r -n 20 -o
+/opt/servsync/confxml_ssh.xml
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

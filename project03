@@ -1,0 +1,305 @@
+了解系统启动过程（rhel5/rhel6/rhel7）
+
+安装U盘系统(了解系统的内部结构/修复故障系统)
+
+安装排错系统(rhel6)
+
+
+--------------------------------
+
+RHEL5 基于init串行启动 (Sysvinit)
+RHEL6 基于init并行启动 (UpStart) udev
+RHEL7 基于systemd 并行启动 (Systemd)
+ 
+
+SysVinit ---> /etc/init.d/httpd 脚本  service httpd start|stop...
+				      chkconfig httpd on
+
+LSB init scripts  ---> /usr/lib/systemd/system/httpd.service
+ 			systemctl start httpd.service
+                         systemctl enable httpd.service
+
+ RHEL5 基于init串行启动
+---------------------------------------------------------------------------------------
+ 第一部分: MBR
+BIOS --- HD ----> 第一扇区(512)----- 446 bootloader
+                                      64 DPT(16主分区)
+				       2 检验值
+# dd if=/dev/vda of=/opt/mbr bs=512 count=1 --导出MBR记录
+# hexdump /opt/mbr 
+ 
+ 第二部分: GRUB
+bootloader --->装载--- stage1 ---> stage2(grub.conf|menu.lst) --->  stage1_5(文件系统驱动器)---> 读取DPT  ---> 挂载 root ()   ---> /dev/sda1 = hd(0,0) = /boot
+ 读取 内核核心 vmlinuz 
+      临时根文件系统 initrd.img
+   只读 挂载 根分区
+       加载/读取 /etc配置文件与/lib 内核库文件
+
+ 第三部分: init
+ init进程 ---- /etc/inittab ---runlevel
+
+                    | rc.sysinit 系统初始化
+                         | mount /etc/fstab 
+                             | /etc/rc.d/rc脚本
+                                 | 传递runlevel 3
+                                     | rc.d/rcX.d   => rc.d/rc3.d
+                                          | K关闭 S启动
+					      | 启动脚本rc.local
+--------------------------------------------------------------------------------------
+
+
+U盘系统
+ 引导程序 GRUB
+ 
+ 内核
+ 组成:
+  vmlinuz 核心文件  CONFIG_NTFS_RW=y
+  initramfs  临时操作系统
+  /lib/modules/`uname -r` 内核模块*.ko (snd-rme96.ko)   CONFIG_NTFS_FS=m
+  /boot/config-3.10.0-229.el7.x86_64  配置[M] [*]
+
+ 文件系统
+# rpm -qf /boot/
+filesystem-3.2-18.el7.x86_64
+
+ SHELL
+# rpm -qf /bin/bash
+bash-4.2.46-12.el7.x86_64
+
+ 应用程序 (工具包|服务软件)
+# rpm -qf `which find`
+findutils-4.5.11-3.el7.x86_64
+# rpm -qf `which mkdir`
+coreutils-8.22-11.el7.x86_64
+  
+
+-------------------------------------------------------------------
+  基于rhel6的U盘系统
+1)格式化U盘
+清空分区表DPT
+[root@localhost ~]# dd if=/dev/zero of=/dev/sda bs=500 count=1
+
+ [root@localhost ~]# fdisk /dev/sda ( n p +4G a 1 w )
+   Device Boot      Start         End      Blocks   Id  System
+/dev/sda1   *           1         549     4203662   83  Linux
+
+[root@localhost ~]# partx -a /dev/sda
+[root@localhost ~]# ll /dev/sda?
+brw-rw---- 1 root disk 8, 1 Sep 21 15:23 /dev/sda1
+[root@localhost ~]# mkfs.ext4 /dev/sda1 
+
+
+[root@localhost ~]# mkdir /mnt/usb
+[root@localhost ~]# mount /dev/sda1  /mnt/usb/
+
+
+2. 安装文件系统 
+[root@localhost ~]# yum -y install filesystem --installroot=/mnt/usb/
+
+3. 安装应用程序与bash shell
+
+[root@localhost ~]# yum -y install bash coreutils findutils grep vim-enhanced rpm yum passwd net-tools util-linux lvm2 openssh-clients bind-utils --installroot=/mnt/usb/
+
+
+4.安装内核
+[root@localhost ~]# cp -a /boot/vmlinuz-2.6.32-431.el6.x86_64 /mnt/usb/boot/
+[root@localhost ~]# cp -a /boot/initramfs-2.6.32-431.el6.x86_64.img /mnt/usb/boot/
+[root@localhost ~]# cp -arv /lib/modules/2.6.32-431.el6.x86_64/ /mnt/usb/lib/modules/
+
+
+
+5 安装grub软件
+
+[root@localhost ~]# rpm -ivh http://172.25.254.254/content/rhel6.5/x86_64/dvd/Packages/grub-0.97-83.el6.x86_64.rpm --root=/mnt/usb/ --nodeps --force 
+
+[root@localhost ~]# grub-install  --root-directory=/mnt/usb/ /dev/sda --recheck
+Installation finished. No error reported.
+
+--驱动文件安装成功
+[root@localhost ~]# ls /mnt/usb/boot/grub/
+device.map     ffs_stage1_5      minix_stage1_5     stage2           xfs_stage1_5
+e2fs_stage1_5  iso9660_stage1_5  reiserfs_stage1_5  ufs2_stage1_5
+fat_stage1_5   jfs_stage1_5      stage1             vstafs_stage1_5
+
+
+配置 grub.conf
+[root@localhost ~]# cp /boot/grub/grub.conf  /mnt/usb/boot/grub/
+[root@localhost ~]# vim /mnt/usb/boot/grub/grub.conf 
+default=0
+timeout=5
+splashimage=/boot/grub/splash.xpm.gz
+hiddenmenu
+title My usb system from hugo
+        root (hd0,0)
+        kernel /boot/vmlinuz-2.6.32-431.el6.x86_64 ro root=UUID=b9159dca-252a-4919-bee1-5743d2d1bbd7 selinux=0 
+        initrd /boot/initramfs-2.6.32-431.el6.x86_64.img
+
+
+[root@localhost ~]# blkid  /dev/sda1 
+/dev/sda1: UUID="b9159dca-252a-4919-bee1-5743d2d1bbd7" TYPE="ext4" 
+
+[root@localhost ~]# cp /boot/grub/splash.xpm.gz /mnt/usb/boot/grub/
+
+
+
+
+
+6 完善配置文件
+[root@localhost ~]# cp /etc/skel/.bash* /mnt/usb/root/
+
+[root@localhost ~]# chroot /mnt/usb/  --切换根文件系统
+[root@localhost /]# exit  --退出
+
+配置主机名与网卡
+[root@localhost ~]# vim /mnt/usb/etc/sysconfig/network
+NETWORKING=yes
+HOSTNAME=myusb.hugo.org
+
+[root@localhost ~]# cp /etc/sysconfig/network-scripts/ifcfg-eth0 /mnt/usb/etc/sysconfig/network-scripts/
+
+[root@localhost ~]# vim /mnt/usb/etc/sysconfig/network-scripts/ifcfg-eth0 
+DEVICE="eth0"
+BOOTPROTO="static"
+ONBOOT="yes"
+IPADDR=192.168.0.8
+NETMASK=255.255.255.0
+GATEWAY=192.168.0.254
+DNS1=8.8.8.8
+
+定义fstab
+[root@localhost ~]# blkid  /dev/sda1 
+/dev/sda1: UUID="b9159dca-252a-4919-bee1-5743d2d1bbd7" TYPE="ext4" 
+
+[root@localhost ~]# vim /mnt/usb/etc/fstab
+UUID="b9159dca-252a-4919-bee1-5743d2d1bbd7" /  ext4 defaults 0 0
+proc                    /proc                   proc    defaults        0 0
+sysfs                   /sys                    sysfs   defaults        0 0
+tmpfs                   /dev/shm                tmpfs   defaults        0 0
+devpts                  /dev/pts                devpts  gid=5,mode=620  0 0
+
+设置密码:
+[root@localhost ~]# grub-md5-crypt 
+Password: 
+Retype password: 
+$1$HORgV/$uu5Ipz.4aRdZKCszBDput0
+
+[root@localhost ~]# vim /mnt/usb/etc/shadow
+root:$1$HORgV/$uu5Ipz.4aRdZKCszBDput0:15937:0:99999:7:::
+
+[root@localhost ~]# umount /mnt/usb/
+
+测试 从U盘启动
+
+
+-----------------------------------------------------------------
+下载ks文件，并pxe环境发布:
+
+wget ftp://172.25.254.250/notes/project/software/troble_cfg/trouble.cfg
+
+mv trouble.cfg  /var/www/html
+
+[root@pxe html]# vim /var/lib/tftpboot/pxelinux.cfg/default 
+label trouble
+        menu label Install trouble1
+        kernel rhel6u5/vmlinuz
+        append initrd=rhel6u5/initrd.img ks=http://192.168.0.16/trouble.cfg
+
+
+---------安装系统---------------------------
+
+
+
+
+
+
+
+
+
+
+--------------------------排错系统---------------------------
+
+网络|光盘Rescue
+U盘
+
+ MBR故障（丢失）
+   分区表丢失
+
+导出完整分区表 查看 dd
+
+ 1> 观察系统的分区结构fdisk -l
+sda1 ---> /boot 
+sda2 ---> LVM 
+sda3 ---> swap 
+
+ 发现lvm的vg，lv
+vgs--vol0
+lvs --> home ---> root 
+
+ 2>  导出mbr记录 dd
+ 查询mbr内容 hexdump （故障系统自带该命令）
+
+dd if=/dev/xxx of=mbr bs=512 count=1
+mount /dev/xxxx /mnt/root
+/mnt/root/usr/bin/hexdump  ./mbr  
+
+
+ 3> 将故障系统的根目录挂载
+  
+问题1: Rescue无法识别lvm  激活lv
+ vgchange -ay vol0
+ls /dev/mapper/vol0-root
+
+ 新建挂载点/mnt/root  /mnt/root/boot/
+mount /dev/mapper/vol0-root /mnt/root 
+mount /dev/sda1 /mnt/root/boot/
+
+
+ hexdump ./mbr ---不完整
+
+修复通过grub修复mbr
+
+grub> root (hd0,0)
+grub> setup (hd0)
+
+
+------------------------------------------------
+
+
+ 启动引导器 grub
+ grub.conf文件 
+
+手动引导
+
+grub> root (hd0,0)
+grub> kernel /vmlinuz  ro root=/path
+grub> initrd /initamfs...img
+grub> boot
+
+丢失grub.conf文件
+
+ --进入U盘系统 挂载根分区 然后新建grub.conf
+------------------------------------------
+
+启动文件|应用程序|二进制命令
+
+mount命令丢失
+/etc/fstab 文件丢失
+不停重启
+/tmp 权限
+ 
+----------任务------------------------------
+1 配置U盘系统(rhel6)  测试成功
+2 使用脚本快速部署U盘系统
+3 下载cfg文件 wget ftp://172.25.254.253/trouble.cfg
+              wget ftp://172.25.254.253/trouble2.cfg
+
+4 使用PXE发布cfg文件
+
+5 安装troubleshooting系统，修复故障
+------------------------------------------
+
+
+
+
+
+

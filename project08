@@ -1,0 +1,453 @@
+
+1.cacti监控简述##
+Cacti 是一一套基于 PHP、MySQL、SNMP 及 RRDTool 开发的监测图形分析工工具。它提供了非非常强大大的数据和用用户管理功能,可以指定每一一个用用户能查看树状结构、主机以及任何一一张图,还可以与轻量级⺫目目录服务(LDAP)结合进行行用用户验证,同时也能自自己己编写模板,功能非非常强大大完善界面面友好。可是随着设备的不断增多,Cacti 的运行行机制就不能满足足我们的需求了。Cacti 是使用用轮询的方方式由主服务器向设备发送数据请求来获取设备上状态数据信息的,如果设备不断增多,这个轮询的过程就非非常的耗时,轮询的结果就不能即时的反应设备的状态了。Cacti 监控关注的是对数据的展示示,却不关注数据异常后的反馈。如果凌晨 3 点的时候设备的某个数据出现异常,除非非监控人人员在屏幕前发现这个异常变化,否则是没有任何报警机制能够让我们知道出现了异常。
+
+
+
+2 部署
+
+
+[root@foundation1 ~]# rht-vmctl reset servera
+[root@foundation1 ~]# rht-vmctl reset serverb
+ 
+ 1） 下载软件，并安装
+[root@servera ~]# setenforce 0
+
+lftp 172.25.254.250:/notes/project/UP200/UP200_cacti-master> mirror pkg/
+
+ 2) 安装lamp
+[root@servera ~]# yum -y install httpd php php-mysql mariadb-server mariadb
+[root@servera pkg]# yum localinstall cacti-0.8.8b-7.el7.noarch.rpm php-snmp-5.4.16-23.el7_0.3.x86_64.rpm 
+
+
+  3).配置mysql数据库
+[root@servera pkg]# service mariadb start
+MariaDB [(none)]> create database cacti ;
+MariaDB [(none)]> grant all on cacti.* to cactidb@'localhost' identified by '123456';
+MariaDB [(none)]> flush privileges;
+
+
+
+[root@servera ~]# vim /etc/cacti/db.php 
+$database_type = "mysql";
+$database_default = "cacti";
+$database_hostname = "localhost";
+$database_username = "cactidb";
+$database_password = "123456";
+$database_port = "3306";
+$database_ssl = false;
+
+[root@servera ~]# mysql -ucactidb -p123456 cacti < /usr/share/doc/cacti-0.8.8b/cacti.sql 
+
+
+
+ 4) 配置cacti的相关参数
+
+[root@servera ~]# vim /etc/httpd/conf.d/cacti.conf 
+
+
+
+<Directory /usr/share/cacti/>
+        <IfModule mod_authz_core.c>
+                # httpd 2.4
+                Require all granted
+        </IfModule>
+</Directory>
+
+
+
+ 5） 配置php时区
+[root@servera ~]# timedatectl set-timezone Asia/Shanghai
+[root@servera ~]# vim /etc/php.ini 
+date.timezone = 'Asia/Shanghai'
+
+
+ 6） 变更计划任务 --> 让其五分钟出一一次图####
+
+[root@servera ~]# vim /etc/cron.d/cacti 
+*/5 * * * *     cacti   /usr/bin/php /usr/share/cacti/poller.php > /dev/null 2>&1
+
+
+ 7)启动服务####
+[root@servera ~]# service httpd restart
+[root@servera ~]# service snmpd start
+[root@servera ~]# netstat -anlp |grep :161
+
+
+  8)访问测试:通过 图形化浏览器来访问:####
+
+firefox:
+url----> http://172.25.1.10/cacti/install
+
+
+
+用户与密码 admin/admin
+
+
++++++++++++++++++++++++++
+配置cacti监控本地服务器 
+++++++++++++++++++++++++++
+
+
+
+
+[root@servera ~]# rpm -qa |grep net-snmp
+net-snmp-libs-5.7.2-20.el7.x86_64
+net-snmp-agent-libs-5.7.2-20.el7.x86_64
+net-snmp-utils-5.7.2-20.el7.x86_64
+net-snmp-5.7.2-20.el7.x86_64
+
+[root@servera ~]# rpm -ql net-snmp |grep snmpd.conf
+/etc/snmp/snmpd.conf
+
+
+[root@servera ~]# vim /etc/snmp/snmpd.conf 
+com2sec notConfigUser  default       publicupl
+view    systemview    included   .1
+[root@servera ~]# service snmpd restart
+
+点击左边device,选择localhost,看到如下界面面,在snmp options这里里选择snmp version2:
+
+
++++++++++++++++++++++++++
+配置cacti监控其他服务器 linux（serverb） + windows + 网络设备（交换机/路由器）
+++++++++++++++++++++++++++
+
+
+
+
+[root@serverb ~]# setenforce 0
+[root@serverb ~]# yum -y install net-snmp
+
+同步配置文件:
+[root@servera ~]# rsync -avzR /etc/snmp/snmpd.conf serverb1:/
+[root@serverb ~]# service snmpd start
+
+
+点击左边device,新建serverb,看到如下界面面,在snmp options这里里选择snmp version2:
+
+
+
+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+
+
+
+1、Nagios的概述
+	Nagios是一款用于系统和网络监控的应用程序。它可以在你设定的条件下对主机和服务进行监控，在状态变差和变好的时候给出告警信息。
+	Nagios最初被设计为在Linux系统之上运行，然而它同样可以在类Unix的系统之上运行。
+	Nagios更进一步的特征包括：
+		监控网络服务（SMTP、POP3、HTTP、NNTP、PING等）；	－－公共服务
+		监控主机资源（处理器负荷、磁盘利用率等）；		－－私有服务
+		简单地插件设计使得用户可以方便地扩展自己服务的检测方法； 
+		并行服务检查机制；
+		当服务或主机问题产生与解决时将告警发送给联系人（通过EMail、短信、用户定义方式）；
+		具备定义事件句柄功能，它可以在主机或服务的事件发生时获取更多问题定位；
+		可选的WEB界面用于查看当前的网络状态、通知和故障历史、日志文件等；
+nagios的组成：
+	1、nagios的核心组件
+	2、nagios监控插件
+	3、nagios web页面（html/cgi/php）
+	4、nrpe远程主机私有服务的监控组件
+
+
+
+
+
+
+------------------------------------------------------------------
+
+安装nagios（rpm包）
+lftp 172.25.254.250:/notes/project/UP200/UP200_nagios-master> mirror pkg/
+[root@servera pkg]# yum localinstall *.rpm
+
+
+
+了解httpd的nagios虚拟主机
+[root@servera ~]# cat /etc/httpd/conf.d/nagios.conf
+
+我们需要使用用 htpasswd 工工具设置 /etc/nagios/passwd 文文件,用用户名是 nagiosadmin,密码我们设置为 uplooking
+[root@servera ~]# htpasswd -c /etc/nagios/passwd nagiosadmin
+New password: 
+Re-type new password: 
+Adding password for user nagiosadmin
+[root@servera ~]# cat /etc/nagios/passwd 
+nagiosadmin:$apr1$rpi3RAVz$vJSCf1FosMa3CidTmFrtC.
+
+
+[root@servera ~]# systemctl restart httpd
+[root@servera ~]# systemctl start nagios
+
+
+访问:
+   http://172.25.1.10/nagios/
+
+++++++++++++++++++了解配置文件++++++++++++++++++++++++++++++
+
+
+监控一台主机包括的内容:主机是否活着/公共服务/私有服务
+配置文件的组成：		－－全局变量(变量的调用使用use命令)
+nagios.cfg				主配置文件,实现配置文件总调度
+resource.cfg				资源
+commands.cfg				监控使用的命令（通知的命令｜监控私有服务的命令｜监控公共服务的命令）
+contacts.cfg				联系人（nagiosadmin-->nagios@localhost）
+timeperiods.cfg				监控周期(7x24 5x8(1-5))
+templates.cfg				模板(通知｜genric-host| linux-server| local-server)
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+
+
+-------------------
+ 监控本机
+[root@servera ~]# cat /etc/nagios/objects/localhost.cfg  |grep -v ^# |grep -v ^$
+define host{
+        use                     linux-server
+        host_name               localhost
+        alias                   nagios监控器
+        address                 127.0.0.1
+        }
+define hostgroup{
+        hostgroup_name  linux-servers ; The name of the hostgroup
+        alias           Linux Servers ; Long name of the group
+        members         localhost     ; Comma separated list of hosts that belong to this group
+        }
+define service{
+        use                             local-service         ; Name of service template to use
+        host_name                       localhost
+        service_description             PING
+	check_command			check_ping!100.0,20%!500.0,60%
+        }
+define service{
+        use                             local-service         ; Name of service template to use
+        host_name                       localhost
+        service_description             Root Partition
+	check_command			check_local_disk!20%!10%!/
+        }
+define service{
+        use                             local-service         ; Name of service template to use
+        host_name                       localhost
+        service_description             Current Users
+	check_command			check_local_users!20!50
+        }
+define service{
+        use                             local-service         ; Name of service template to use
+        host_name                       localhost
+        service_description             Total Processes
+	check_command			check_local_procs!250!400!RSZDT
+        }
+define service{
+        use                             local-service         ; Name of service template to use
+        host_name                       localhost
+        service_description             Current Load
+	check_command			check_local_load!5.0,4.0,3.0!10.0,6.0,4.0
+        }
+define service{
+        use                             local-service         ; Name of service template to use
+        host_name                       localhost
+        service_description             Swap Usage
+	check_command			check_local_swap!20!10
+        }
+define service{
+        use                             local-service         ; Name of service template to use
+        host_name                       localhost
+        service_description             SSH
+	check_command			check_ssh
+	notifications_enabled		0
+        }
+define service{
+        use                             local-service         ; Name of service template to use
+        host_name                       localhost
+        service_description             HTTP
+	check_command			check_http
+	notifications_enabled		0
+        }
+
+
+[root@servera objects]# service nagios start
+[root@servera objects]# nagios -v /etc/nagios/nagios.cfg
+
+
+
+--------------------------------------------------------------------
+
+
+### 配置被监控主机运行环境###
+
+
+#### 软件安装####
+
+为了方便配置和监测，我们需要在该服务器上安装 nagios 的客户端和监控内容对应的插件。在该服务器上我们还需要配置 nrpe，让它运行servera的 nagios 访问并且执行命令监测各内容的运行状况。
+
+实际工作中，为保证系统的整洁和安全，一般需要监控监控什么内容，再只安装什么插件。
+
+在我们的实验环境中，可以在classroom服务器下载需要的软件包，然后将其安装。
+
+
++++++++++++++++++++
+ 编译nagios的插件
+/usr/sbin/useradd nagios
+passwd nagios
+
+wget ftp://172.25.254.250/notes/project/software/nagios/nagios-plugins-1.4.14.tar.gz
+
+tar xf nagios-plugins-1.4.14.tar.gz
+
+yum -y install gcc openssl-devel
+
+make 
+make install
+chown nagios.nagios /usr/local/nagios
+chown -R nagios.nagios /usr/local/nagios/libexec
+
+yum -y install xinetd
+
+
+编译nrpe服务
+lftp 172.25.254.250:/notes/project/software/nagios> get nrpe-2.12.tar.gz 
+
+
+[root@serverb nrpe-2.12]# yum -y install gcc
+[root@serverb nrpe-2.12]# yum -y install xinetd
+
+
+[root@serverb ~]# cd nrpe-2.12/
+[root@serverb nrpe-2.12]# ./configure 
+[root@serverb nrpe-2.12]# make all
+[root@serverb nrpe-2.12]# make install-plugin
+[root@serverb nrpe-2.12]# make install-daemon
+[root@serverb nrpe-2.12]# make install-daemon-config
+[root@serverb nrpe-2.12]# make install-xinetd
+[root@serverb nrpe-2.12]# vim /etc/xinetd.d/nrpe 
+        only_from       = 127.0.0.1 172.25.1.10
+
+[root@serverb nrpe-2.12]# vim /etc/services 
+nrpe            5666/tcp                # nrpe
+
+
+[root@serverb ~]# vim /usr/local/nagios/etc/nrpe.cfg
+command[check_users]=/usr/local/nagios/libexec/check_users -w 5 -c 10
+command[check_load]=/usr/local/nagios/libexec/check_load -w 15,10,5 -c 30,25,20
+command[check_vda1]=/usr/local/nagios/libexec/check_disk -w 20% -c 10% -p /dev/vda1
+command[check_zombie_procs]=/usr/local/nagios/libexec/check_procs -w 5 -c 10 -s Z
+command[check_total_procs]=/usr/local/nagios/libexec/check_procs -w 150 -c 200 
+command[check_sb]=/usr/local/nagios/libexec/check_swap -w 20% -c 10%
+
+
+
+[root@serverb ~]# systemctl restart  xinetd
+[root@serverb ~]# netstat -tnlp |grep :5666
+tcp        0      0 0.0.0.0:5666            0.0.0.0:*               LISTEN      2330/nrpe           
+tcp6       0      0 :::5666                 :::*                    LISTEN      2330/nrpe
+
+本地检测:
+[root@serverb nrpe-2.12]# /usr/local/nagios/libexec/check_nrpe -H localhost
+NRPE v2.12
+
++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+ 监控端:
+
+# 定义命令
+[root@servera ~]# vim /etc/nagios/objects/commands.cfg
+define command{
+        command_name check_nrpe
+        command_line $USER1$/check_nrpe -H $HOSTADDRESS$ -c $ARG1$
+}
+
+
+[root@servera objects]# cat /etc/nagios/objects/serverb.cfg
+define host{
+        use                     linux-server                                                         
+        host_name               serverb.pod1.example.com
+        alias                   serverb1
+        address                 172.25.1.11
+        }
+define hostgroup{
+        hostgroup_name  uplooking-servers 
+        alias           uplooking 
+        members         serverb.pod1.example.com     
+        }
+# 定义监控服务
+define service{
+        use generic-service
+        host_name serverb.pod1.example.com
+        service_description load
+        check_command check_nrpe!check_ll
+}
+define service{
+        use generic-service
+        host_name serverb.pod1.example.com
+        service_description user
+        check_command check_nrpe!check_uu
+}
+
+define service{
+        use generic-service
+        host_name serverb.pod1.example.com
+        service_description root
+        check_command check_nrpe!check_root
+}
+
+define service{
+        use generic-service
+        host_name serverb.pod1.example.com
+        service_description zombie
+        check_command check_nrpe!check_zombie_procs
+}
+
+
+
+define service{
+        use generic-service
+        host_name serverb.pod1.example.com
+        service_description procs
+        check_command check_nrpe!check_total_procs
+}
+
+
+define service{
+        use generic-service
+        host_name serverb.pod1.example.com
+        service_description swap
+        check_command check_nrpe!check_haha
+}
+
+------------------------------------------------------------------------
+
+
+[root@servera objects]# vim /etc/nagios/nagios.cfg 
+cfg_file=/etc/nagios/objects/serverb.cfg
+
+----------------------------------------------
+
+[root@servera objects]# nagios -v /etc/nagios/nagios.cfg
+
+[root@servera ~]#  /usr/lib64/nagios/plugins/check_nrpe -H 172.25.1.11
+NRPE v2.12
+
+[root@servera ~]#  /usr/lib64/nagios/plugins/check_nrpe -H 172.25.1.11 -c check_haha
+SWAP OK - 100% free (10238 MB out of 10238 MB) |swap=10238MB;2047;1023;0;10238
+
+
+
+
+[root@servera objects]# systemctl restart nagios
+
+
+
+
+
+-----------------------------
+
+第三方程序报警：
+
+  110云告警:
+http://www.onealert.com
+
+注册--添加应用--获取APP KEY值
+
+
+执行脚本:
+sudo AppKey=db5be68e-7199-1a3b-6c3e-e85e89ee78e1 Plugin=nagios sh -c "$(curl -L https://raw.githubusercontent.com/oneapm/onealert-agent-installer/master/onealert-nagios-install-centos7.sh)"
+
+ 

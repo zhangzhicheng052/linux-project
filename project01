@@ -1,0 +1,277 @@
+  分组: （8个组）
+  环境安装  fX 
+---------------------------------------
+启动/下载
+  rht-vmctl start servera
+关闭/关机
+  rht-vmctl stop/poweroff servera
+重置
+  rht-vmctl reset servera
+重新下载
+ rht-vmctl fullreset servera
+---------------------------------------
+ 
+
+自动化运维（DevOps）
+3 个功能模块:
+ 1. 系统预备  "Kickstart|Cobbler"
+     1) 自动化安装操作系统及常用软件包 
+ 2. 配置管理  "Puppet(*.pp)|Ansible|saltstack"
+     1) 自动化部署业务系统软件包并完成配置
+     2) 远程管理服务器(开关服务等)
+     3) 变更回滚
+ 3. 监控报警 "Cacti+nagios|Zabbix(企业级)"
+     1) 服务器可用性、性能、安全监控
+     2) 向管理员发送报警信息
+
+
+
++++++++++++++++++++++++++++++
+PXE 网络无人值守安装
+++++++++++++++++++++++++++++
+
+第一步:
+  1)将servera服务器当成路由器（构造局域网)
+   设置serverg服务器关闭eth0 设置eth1的网关
+
+[root@foundation1 ~]# ssh root@172.25.1.10
+[root@servera ~]# ssh root@192.168.0.16
+
+  
+
+[root@serverg ~]# vim /etc/sysconfig/network-scripts/ifcfg-eth1 
+DEVICE=eth1
+BOOTPROTO=static
+ONBOOT=yes
+TYPE=Ethernet
+USERCTL=yes
+IPV6INIT=no
+IPADDR=192.168.0.16
+GATEWAY=192.168.0.10
+NETMASK=255.255.255.0
+
+关闭桥接网络:
+[root@serverg ~]# vim /etc/sysconfig/network-scripts/ifcfg-eth0  
+ONBOOT=no
+[root@serverg ~]# systemctl restart network
+
+查看默认路由(网关)
+[root@serverg ~]# route -n |head -3|tail -1
+0.0.0.0         192.168.0.10    0.0.0.0         UG    0      0        0 eth1
+
+
+2） 配置servera 路由器
+[root@foundation0 ~]# ssh root@servera1
+
+[root@servera ~]# vi /etc/sysctl.conf 
+net.ipv4.ip_forward = 1
+[root@servera ~]# sysctl -p
+[root@servera ~]# cat /proc/sys/net/ipv4/ip_forward
+1
+
+[root@servera ~]# iptables -t nat -A POSTROUTING -s 192.168.0.0/24 -j SNAT --to-source 172.25.1.10
+
+第二步:
+注意:关闭selinux与iptables
+[root@serverg ~]# sed -i 's/^SELINUX=.*/SELINUX=disabled/' /etc/selinux/config 
+[root@serverg ~]# echo "/sbin/setenforce 0" >> /etc/rc.local 
+[root@serverg ~]# chmod +x /etc/rc.local 
+[root@serverg ~]# source  /etc/rc.local 
+
+ 
+  下载iso ，发布iso，配置yum源
+[root@serverg ~]# ping 172.25.254.254
+PING 172.25.254.254 (172.25.254.254) 56(84) bytes of data.
+64 bytes from 172.25.254.254: icmp_seq=29 ttl=63 time=1.35 ms
+
+
+[root@serverg ~]# showmount -e 172.25.254.250
+/content    172.25.0.0/255.255.0.0
+[root@serverg ~]# mount -t nfs 172.25.254.250:/content /mnt/
+
+
+挂载iso到本地
+[root@serverg ~]# mkdir /yum
+[root@serverg ~]# mount -o loop /mnt/rhel7.1/x86_64/isos/rhel-server-7.1-x86_64-dvd.iso  /yum/
+
+
+[root@serverg ~]# cd /etc/yum.repos.d/
+[root@serverg yum.repos.d]# find . -regex '.*\.repo$' -exec mv {} {}.back \;
+
+
+[root@serverg ~]# cat > /etc/yum.repos.d/local.repo << EOT
+> [local]
+> baseurl=file:///yum
+> gpgcheck=0
+> EOT
+
+[root@serverg ~]# yum clean all
+[root@serverg ~]# yum repolist
+
+
+第三步： 搭建DHCP
+[root@serverg ~]# yum -y install dhcp
+[root@serverg ~]# \cp /usr/share/doc/dhcp-4.2.5/dhcpd.conf.example  /etc/dhcp/dhcpd.conf 
+
+
+
+[root@serverg mnt]# vim /etc/dhcp/dhcpd.conf
+allow booting; # 定义能够pxe启动
+allow bootp; # 定义支持bootp
+
+option domain-name "pod1.example.com";
+option domain-name-servers 172.25.254.254;
+default-lease-time 600; # 租约时间
+max-lease-time 7200;
+
+log-facility local7;
+
+subnet 192.168.0.0 netmask 255.255.255.0 {
+  range 192.168.0.50 192.168.0.60;  # 地址池范围
+  option domain-name-servers 172.25.254.254;  # DNS服务器地址
+  option domain-name "pod0.example.com"; # 域名
+  option routers 192.168.0.10; # 网关
+  option broadcast-address 192.168.0.255; # 广播地址
+  default-lease-time 600; # 租约时间
+  max-lease-time 7200;
+  next-server 192.168.0.16; # tftp的服务器ip地址
+  filename "pxelinux.0"; # 下载的引导文件的名字，pxe环境的文件名字都是pxelinux.0、
+}
+
+
+
+[root@serverg ~]# dhcpd  -t
+[root@serverg ~]# systemctl start dhcpd
+[root@serverg ~]# netstat -unlp |grep :67
+udp        0      0 0.0.0.0:67              0.0.0.0:*                           2440/dhcpd 
+
+
+第四步: TFTP
+[root@serverg ~]# yum -y install tftp-server
+[root@serverg ~]# ls /var/lib/tftpboot/  ---tftp家目录
+[root@serverg ~]# yum -y install syslinux
+[root@serverg ~]# cp /usr/share/syslinux/pxelinux.0  /var/lib/tftpboot/
+
+[root@serverg ~]# cd /var/lib/tftpboot/   ---生成pxelinux.0环境的配置文件目录
+[root@serverg tftpboot]# mkdir pxelinux.cfg
+[root@serverg tftpboot]# cd pxelinux.cfg
+[root@serverg tftpboot]# touch default
+
+default vesamenu.c32 # 提供图形界面
+timeout 60 # 超时时间
+display boot.msg # 介绍信息
+menu background splash.png # 背景图片
+menu title Welcome to Global Learning Services Setup! 　# 大标题
+
+label local  # 标签
+        menu label Boot from ^local drive #　标题
+        menu default　# 指定超时时间里没选标题，默认从那个标题进入
+        localhost 0xffff # 本地启动位置
+
+label install
+        menu label Install rhel7
+        kernel vmlinuz　# 内核所在位置
+        append initrd=initrd.img ks=http://192.168.0.16/myks.cfg # 指定initrd文件及后续kickstart文件所在位置
+
+
+  生成引导相关文件
+[root@serverg ~]# cd /yum/isolinux
+[root@serverg isolinux]# cp splash.png vesamenu.c32 vmlinuz initrd.img /var/lib/tftpboot/
+
+
+[root@serverg ~]# vim /etc/xinetd.d/tftp 
+        disable                 = no
+[root@serverg ~]# systemctl start xinetd
+[root@serverg ~]# netstat -unlp |grep :69
+
+
+第五步: 生成ks文件
+
+第一种方式: /root/anaconda-ks.cfg （复制）
+第二种方式: kickstart工具
+
+图形化界面:
+# yum -y install system-config-kickstart
+
+--------------------------------------------------
+[root@serverg tftpboot]# cat /var/www/html/myks.cfg 
+#version=RHEL7
+# System authorization information
+auth --enableshadow --passalgo=sha512
+# Reboot after installation 
+reboot # 装完系统之后是否重启
+# Use network installation
+url --url="http://192.168.0.16/rhel7u1/"  # 网络安装介质所在位置
+# Use graphical install
+#graphical 
+text # 采用字符界面安装
+# Firewall configuration
+firewall --enabled --service=ssh  # 防火墙的配置
+firstboot --disable 
+ignoredisk --only-use=vda
+# Keyboard layouts
+# old format: keyboard us
+# new format:
+keyboard --vckeymap=us --xlayouts='us' # 键盘的配置
+# System language 
+lang en_US.UTF-8 # 语言制式的设置
+# Network information
+network  --bootproto=dhcp # 网络设置
+network  --hostname=localhost.localdomain
+#repo --name="Server-ResilientStorage" --baseurl=http://download.eng.bos.redhat.com/rel-eng/latest-RHEL-7/compose/Server/x86_64/os//addons/ResilientStorage
+# Root password
+rootpw --iscrypted nope 
+# SELinux configuration
+selinux --disabled
+# System services
+services --disabled="kdump,rhsmcertd" --enabled="network,sshd,rsyslog,ovirt-guest-agent,chronyd"
+# System timezone
+timezone Asia/Shanghai --isUtc
+# System bootloader configuration
+bootloader --append="console=tty0 crashkernel=auto" --location=mbr --timeout=1 --boot-drive=vda 
+# 设置boot loader安装选项 --append指定内核参数 --location 设定引导记录的位置
+# Clear the Master Boot Record
+zerombr # 清空MBR
+# Partition clearing information
+clearpart --all --initlabel # 清空分区信息
+# Disk partitioning information
+part / --fstype="xfs" --ondisk=vda --size=6144 # 设置根目录的分区情况
+%post # 装完系统后执行脚本部分
+echo "redhat" | passwd --stdin root
+useradd carol
+echo "redhat" | passwd --stdin carol
+# workaround anaconda requirements
+%end
+
+%packages # 需要安装的软件包
+@core
+%end
+
+-------------------------------------------------------------------
+
+
+
+第六步： 安装httpd服务 发布ks与iso镜像
+[root@serverg ~]# yum -y install httpd
+[root@serverg ~]# cp /root/myks.cfg /var/www/html/myks.cfg 
+
+
+[root@serverg ~]# ln -s /yum/* /var/www/html/rhel7u1 
+
+[root@serverg ~]# service httpd start
+[root@serverg ~]# systemctl enable xinetd
+[root@serverg ~]# systemctl enable httpd
+[root@serverg ~]# systemctl enable dhcpd
+
+至此，整体安装完成。
+
+打开install虚拟机测试，测试结果略
+
+
+
+
+
+
+
+
+
