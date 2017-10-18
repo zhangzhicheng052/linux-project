@@ -1,2 +1,2 @@
 # project
-uplooking
+Linux project
