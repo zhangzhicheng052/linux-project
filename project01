@@ -1,16 +1,3 @@
-  分组: （8个组）
-  环境安装  fX 
----------------------------------------
-启动/下载
-  rht-vmctl start servera
-关闭/关机
-  rht-vmctl stop/poweroff servera
-重置
-  rht-vmctl reset servera
-重新下载
- rht-vmctl fullreset servera
----------------------------------------
- 
 
 自动化运维（DevOps）
 3 个功能模块:
